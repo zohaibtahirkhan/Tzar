@@ -1,0 +1,42 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+websockets==14.1
+python-multipart==0.0.17
+aiofiles==24.1.0
+
+# STT
+faster-whisper==1.1.0
+
+# VAD
+silero-vad==5.1.2
+
+# Wake word
+openwakeword==0.6.0
+
+# TTS
+kokoro==0.9.4
+sounddevice==0.5.1
+soundfile==0.12.1
+
+# LLM
+llama-cpp-python==0.3.4
+
+# Audio
+pyaudio==0.2.14
+numpy==2.1.3
+scipy==1.14.1
+
+# DB
+aiosqlite==0.20.0
+
+# Utils
+pydantic==2.10.1
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+loguru==0.7.2
+httpx==0.28.0
+duckduckgo-search==7.2.1
+
+
+sentence-transformers==3.3.1
+aiofiles==24.1.0
