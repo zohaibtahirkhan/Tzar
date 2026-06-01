@@ -37,6 +37,8 @@ from app.memory.manager import memory_manager
 from app.tools.router import ToolRouter, extract_tool_calls, strip_tool_calls
 from app.prompts.templates import build_system_prompt, format_tool_result
 from app.utils.timing import LatencyMetrics, Timer
+from app.memory.session_store import log_turn
+from app.planner import needs_planning, make_plan
 
 
 # ── Speech state set by LLM each turn ────────────────────────────────────────
@@ -64,12 +66,13 @@ def _parse_llm_json(raw: str) -> dict:
             data = json.loads(match.group())
             if "speech" not in data or not isinstance(data["speech"], dict):
                 data["speech"] = {"pace": 1.0, "clause_pause_ms": 120, "tone": "neutral"}
+            if "confidence" not in data:
+                data["confidence"] = 0.9
             return data
         except json.JSONDecodeError:
             pass
     logger.warning("JSON parse failed. Treating raw output as plain response. Raw: {}", raw[:200])
     return {
-        "thought": "",
         "tool": None,
         "tool_params": None,
         "response": clean,
@@ -89,6 +92,7 @@ class AssistantPipeline:
         self._speaking = False
         self._interrupted = False
         self._speech_meta = SpeechMeta()   # updated each turn by LLM
+        self._interruptible = True
 
     def _extract_speech_meta(self, data: dict) -> SpeechMeta:
         s = data.get("speech", {})
@@ -110,7 +114,16 @@ class AssistantPipeline:
         logger.info("User: {}", user_text)
 
         memory_ctx, conv_history = await memory_manager.get_context(user_text)
-        system_prompt = build_system_prompt(memory_ctx, conv_history)
+
+        # ── Planner: inject a step-by-step plan for complex requests ──────────
+        plan_context = ""
+        if needs_planning(user_text):
+            plan = await make_plan(user_text, llm_engine.generate)
+            plan_context = plan.to_context_string()
+            if plan_context:
+                logger.info("Plan injected into prompt.")
+
+        system_prompt = build_system_prompt(memory_ctx, conv_history, plan_context)
         messages = [{"role": "user", "content": user_text}]
 
         # ── First LLM call ────────────────────────────────────────────────────
@@ -157,6 +170,14 @@ class AssistantPipeline:
             tool_name   = data.get("tool")
             tool_params = data.get("tool_params") or {}
 
+        # ── Confidence: log low-confidence answers ────────────────────────────
+        confidence = data.get("confidence", 0.9)
+        if confidence < 0.6:
+            logger.warning(
+                "Low confidence response ({:.0%}) — '{}...'",
+                confidence, (data.get("response") or "")[:60],
+            )
+            
         # ── Extract spoken response (NEVER the raw JSON) ──────────────────────
         spoken = (data.get("response") or "").strip()
         if not spoken:
@@ -164,17 +185,26 @@ class AssistantPipeline:
             spoken = strip_tool_calls(raw).strip()
             # If it still looks like JSON, pull just the response field value out
             if spoken.startswith("{"):
-                spoken = data.get("thought", "") or "Done."
+                spoken = "Done."
 
         # ── Store LLM pacing decisions for speak() ────────────────────────────
         self._speech_meta = self._extract_speech_meta(data)
+        self._interruptible = data.get("interruptible", True)
         logger.info(
-            "Speech meta: pace={} pause_ms={} tone={}",
-            self._speech_meta.pace, self._speech_meta.pause_ms, self._speech_meta.tone
+            "Speech meta: pace={} pause_ms={} tone={} interruptible={}",
+            self._speech_meta.pace, self._speech_meta.pause_ms,
+            self._speech_meta.tone, self._interruptible,
         )
 
         logger.info("Assistant: {}", spoken[:120])
         await memory_manager.add_turn(user_text, spoken)
+        await log_turn("user", user_text)
+        await log_turn("assistant", spoken)
+
+        # Auto-suggest skill creation after complex multi-tool tasks
+        if iterations >= 3:
+            logger.info("Complex task ({} tool calls) — LLM may want to save a skill.", iterations)
+
         return spoken
 
     async def process_text_input_streaming(self, user_text: str) -> AsyncIterator[str]:
@@ -186,7 +216,16 @@ class AssistantPipeline:
         logger.info("User (stream): {}", user_text)
 
         memory_ctx, conv_history = await memory_manager.get_context(user_text)
-        system_prompt = build_system_prompt(memory_ctx, conv_history)
+
+        # ── Planner: inject a step-by-step plan for complex requests ──────────
+        plan_context = ""
+        if needs_planning(user_text):
+            plan = await make_plan(user_text, llm_engine.generate)
+            plan_context = plan.to_context_string()
+            if plan_context:
+                logger.info("Plan injected into prompt.")
+
+        system_prompt = build_system_prompt(memory_ctx, conv_history, plan_context)
         messages = [{"role": "user", "content": user_text}]
 
         raw = await llm_engine.generate(messages, system_prompt)
@@ -227,14 +266,30 @@ class AssistantPipeline:
             tool_name   = data.get("tool")
             tool_params = data.get("tool_params") or {}
 
+        # ── Confidence: log low-confidence answers ────────────────────────────
+        confidence = data.get("confidence", 0.9)
+        if confidence < 0.6:
+            logger.warning(
+                "Low confidence response ({:.0%}) — '{}...'",
+                confidence, (data.get("response") or "")[:60],
+            )
+            
         spoken = (data.get("response") or "").strip()
         if not spoken:
             spoken = strip_tool_calls(raw).strip()
         if spoken.startswith("{"):
-            spoken = data.get("thought", "") or "Done."
+            spoken = "Done."
 
         self._speech_meta = self._extract_speech_meta(data)
+        self._interruptible = data.get("interruptible", True)
+        logger.info(
+            "Speech meta: pace={} pause_ms={} tone={} interruptible={}",
+            self._speech_meta.pace, self._speech_meta.pause_ms,
+            self._speech_meta.tone, self._interruptible,
+        )
         await memory_manager.add_turn(user_text, spoken)
+        await log_turn("user", user_text)
+        await log_turn("assistant", spoken)
 
         # Yield clause by clause so caller can pipe directly into TTS
         for clause in split_into_sentences(spoken):
@@ -283,9 +338,12 @@ class AssistantPipeline:
             self._speaking = False
 
     def interrupt(self) -> None:
-        """Stop TTS immediately (call from wake word detection)."""
-        if self._speaking:
+        """Stop TTS immediately — only if the current response is interruptible."""
+        if self._speaking and self._interruptible:
             self._interrupted = True
+            logger.debug("TTS interrupted (interruptible=True)")
+        elif self._speaking and not self._interruptible:
+            logger.debug("Interrupt blocked — response marked non-interruptible")
 
     async def run_voice_loop(self) -> None:
         self._active = True

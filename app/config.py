@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     llm_top_p: float = 0.9
     llm_repeat_penalty: float = 1.1
     llm_stream: bool = True
+    llm_model: str = 'qwen2.5:3b'
+    LLM_BACKEND: str = "ollama"              # "ollama" or "llamacpp"
+    LLM_OLLAMA_HOST: str = "http://localhost:11434"
 
     # ─── STT ──────────────────────────────────────────────────────────────────
     stt_model: str = "small"       # small supports Urdu + English

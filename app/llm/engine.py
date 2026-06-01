@@ -1,130 +1,135 @@
 """
-LLM engine wrapping llama-cpp-python.
-Supports streaming generation and chat-formatted prompts.
+LLM Engine — Ollama backend.
+
+Talks to a locally running Ollama instance via its HTTP API.
+Supports streaming and non-streaming generation.
+Swap LLM_MODEL in config to change models with zero code changes.
 """
 import asyncio
-import time
+import json
 from typing import AsyncIterator, Optional
 
+import httpx
 from loguru import logger
 
 from app.config import settings
 
 
 class LLMEngine:
-    """
-    Thin async wrapper around llama_cpp.Llama.
-    The model is loaded once and reused across requests.
-    """
-
     def __init__(self):
-        self._llm = None
         self._lock = asyncio.Lock()
+        self._client: Optional[httpx.AsyncClient] = None
+        self._base_url = settings.LLM_OLLAMA_HOST
+        self._model = settings.llm_model
 
-    def is_loaded(self) -> bool:
-        return self._llm is not None
-
-    def load(self) -> None:
-        """Load the model synchronously (call once at startup)."""
-        model_path = str(settings.llm_model_path)
-        if not settings.llm_model_path.exists():
-            logger.error(
-                "Model not found at {}. "
-                "Download Qwen2.5-3B-Instruct-Q4_K_M.gguf and place it in the models/ directory.",
-                model_path,
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=httpx.Timeout(60.0, connect=5.0)
             )
-            raise FileNotFoundError(f"LLM model not found: {model_path}")
+        return self._client
 
-        logger.info("Loading LLM model: {}", model_path)
-        t0 = time.perf_counter()
-
+    async def health_check(self) -> bool:
+        """Returns True if Ollama is running and the model is available."""
         try:
-            from llama_cpp import Llama  # type: ignore
+            client = await self._get_client()
+            r = await client.get("/api/tags")
+            models = [m["name"] for m in r.json().get("models", [])]
+            available = any(self._model in m for m in models)
+            if not available:
+                logger.warning(
+                    "Model '{}' not found in Ollama. Run: ollama pull {}",
+                    self._model, self._model
+                )
+            return available
+        except Exception as e:
+            logger.error("Ollama health check failed: {}", e)
+            return False
 
-            self._llm = Llama(
-                model_path=model_path,
-                n_ctx=settings.llm_context_length,
-                n_threads=settings.llm_threads,
-                n_gpu_layers=0,          # CPU-only
-                verbose=False,
-                use_mlock=True,          # keep model in RAM
-                use_mmap=True,
-            )
-        except ImportError:
-            raise ImportError(
-                "llama-cpp-python is not installed. Run: pip install llama-cpp-python"
-            )
-
-        elapsed = time.perf_counter() - t0
-        logger.info("LLM loaded in {:.2f}s", elapsed)
-
-    async def generate_stream(
+    def _build_payload(
         self,
         messages: list[dict],
-        system_prompt: str,
-        max_tokens: int = settings.llm_max_tokens,
-        temperature: float = settings.llm_temperature,
-    ) -> AsyncIterator[str]:
-        """
-        Async streaming generator. Yields token strings as they are produced.
-        Messages should be in [{"role": ..., "content": ...}] format.
-        """
-        if self._llm is None:
-            raise RuntimeError("LLM not loaded. Call load() first.")
+        system_prompt: str = "",
+        stream: bool = True
+    ) -> dict:
+        ollama_messages = []
+        if system_prompt:
+            ollama_messages.append({"role": "system", "content": system_prompt})
+        ollama_messages.extend(messages)
 
-        full_messages = [{"role": "system", "content": system_prompt}] + messages
-
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
-
-        def _run_inference():
-            try:
-                stream = self._llm.create_chat_completion(
-                    messages=full_messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=settings.llm_top_p,
-                    repeat_penalty=settings.llm_repeat_penalty,
-                    stream=True,
-                )
-                for chunk in stream:
-                    delta = chunk["choices"][0]["delta"]
-                    token = delta.get("content", "")
-                    if token:
-                        loop.call_soon_threadsafe(queue.put_nowait, token)
-            except Exception as e:
-                logger.error("LLM inference error: {}", e)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
-
-        # Run blocking inference in thread pool
-        loop = asyncio.get_event_loop()
-        async with self._lock:
-            await loop.run_in_executor(None, _run_inference)
-
-            t_first = None
-            while True:
-                token = await queue.get()
-                if token is None:
-                    break
-                if t_first is None:
-                    t_first = time.perf_counter()
-                    logger.debug("LLM first token latency: N/A (streaming started)")
-                yield token
+        return {
+            "model": self._model,
+            "messages": ollama_messages,
+            "stream": stream,
+            "options": {
+                "temperature": settings.llm_temperature,
+                "num_ctx": settings.llm_context_length,
+                "num_predict": settings.llm_max_tokens,
+            }
+        }
 
     async def generate(
         self,
         messages: list[dict],
-        system_prompt: str,
-        max_tokens: int = settings.llm_max_tokens,
-        temperature: float = settings.llm_temperature,
+        system_prompt: str = ""
     ) -> str:
-        """Non-streaming generation — accumulates and returns full text."""
-        parts = []
-        async for token in self.generate_stream(messages, system_prompt, max_tokens, temperature):
-            parts.append(token)
-        return "".join(parts)
+        """Non-streaming generation. Returns full response text."""
+        async with self._lock:
+            client = await self._get_client()
+            payload = self._build_payload(messages, system_prompt, stream=False)
+
+            try:
+                r = await client.post("/api/chat", json=payload)
+                r.raise_for_status()
+                return r.json()["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                logger.error("Ollama HTTP error: {} — {}", e.response.status_code, e.response.text)
+                raise
+            except Exception as e:
+                logger.error("Ollama generate failed: {}", e)
+                raise
+
+    async def generate_stream(
+        self,
+        messages: list[dict],
+        system_prompt: str = ""
+    ) -> AsyncIterator[str]:
+        """
+        Streaming generation. Yields text chunks as they arrive.
+        Uses a queue internally so the lock is released between chunks,
+        allowing other coroutines to run.
+        """
+        async with self._lock:
+            client = await self._get_client()
+            payload = self._build_payload(messages, system_prompt, stream=True)
+
+            try:
+                async with client.stream("POST", "/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                            token = chunk.get("message", {}).get("content", "")
+                            if token:
+                                yield token
+                            if chunk.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except httpx.HTTPStatusError as e:
+                logger.error("Ollama stream error: {}", e)
+                raise
+            except Exception as e:
+                logger.error("Ollama stream failed: {}", e)
+                raise
+
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
 
-# Singleton
+# Module-level singleton
 llm_engine = LLMEngine()

@@ -51,6 +51,20 @@ from app.tools.knowledge_graph import (
     kg_temporal_query,
     kg_graph_summary,
 )
+from app.memory.hot_memory import (
+    hot_memory_add,
+    hot_memory_remove,
+    hot_memory_replace,
+    hot_memory_read,
+)
+from app.memory.skills import (
+    skill_load,
+    skill_create,
+    skill_update,
+    skill_rewrite,
+    skill_delete,
+)
+from app.memory.session_store import session_search, session_list
 
 # ─── Tool Registry ────────────────────────────────────────────────────────────
 
@@ -79,6 +93,17 @@ TOOL_REGISTRY: dict[str, Any] = {
     "kg_clusters":      kg_find_clusters,
     "kg_timeline":      kg_temporal_query,
     "kg_summary":       kg_graph_summary,
+    "memory_write":   None,  
+    "memory_remove":  None,
+    "memory_replace": None,
+    "memory_read":    None,
+    "skill_load":    None,  
+    "skill_create":  None,
+    "skill_update":  None,
+    "skill_rewrite": None,
+    "skill_delete":  None,
+    "session_search": None,   
+    "session_list":   None,
     # memory tools are handled inline by ToolRouter (need memory_manager reference)
 }
 
@@ -110,6 +135,17 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "kg_clusters":  [],
     "kg_timeline":  ["node"],
     "kg_summary":   [],
+    "memory_write":   ["target", "content"],
+    "memory_remove":  ["target", "substring"],
+    "memory_replace": ["target", "old_substring", "new_content"],
+    "memory_read":    [],
+    "skill_load":    ["name"],
+    "skill_create":  ["name", "description", "content"],
+    "skill_update":  ["name", "old_text", "new_text"],
+    "skill_rewrite": ["name", "description", "content"],
+    "skill_delete":  ["name"],
+    "session_search": ["query"],
+    "session_list":   [],
 }
 
 DESTRUCTIVE_TOOLS = {"delete_file", "write_file"}
@@ -190,7 +226,66 @@ class ToolRouter:
                     return {"tool": tool_name, "status": "ok", "result": "No matching memories found."}
                 lines = [f"[{m['category']}] {m['content']}" for m in memories]
                 return {"tool": tool_name, "status": "ok", "result": "\n".join(lines)}
+            
+            elif tool_name == "memory_write":
+                # Route through curator to prevent memory pollution
+                candidate = f"[{params['target']}] {params['content']}"
+                from app.memory.curator import process_memory_candidate
+                from app.llm.engine import llm_engine
+                import app.memory.hot_memory as _hm
+                result = await process_memory_candidate(
+                    candidate,
+                    llm_engine.generate,
+                    _hm,
+                )
+                return {"tool": tool_name, "status": "ok", "result": result}
 
+            elif tool_name == "memory_remove":
+                result = hot_memory_remove(params["target"], params["substring"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "memory_replace":
+                result = hot_memory_replace(params["target"], params["old_substring"], params["new_content"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "memory_read":
+                target = params.get("target", "both")
+                result = hot_memory_read(target)
+                return {"tool": tool_name, "status": "ok", "result": result}
+            
+            elif tool_name == "skill_load":
+                result = skill_load(params["name"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "skill_create":
+                result = skill_create(
+                    params["name"],
+                    params["description"],
+                    params["content"],
+                    params.get("category", "general"),
+                )
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "skill_update":
+                result = skill_update(params["name"], params["old_text"], params["new_text"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "skill_rewrite":
+                result = skill_rewrite(params["name"], params["description"], params["content"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "skill_delete":
+                result = skill_delete(params["name"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "session_search":
+                result = await session_search(params["query"])
+                return {"tool": tool_name, "status": "ok", "result": result}
+
+            elif tool_name == "session_list":
+                result = await session_list()
+                return {"tool": tool_name, "status": "ok", "result": result}
+            
             # Registered async tools
             fn = TOOL_REGISTRY[tool_name]
             result = await fn(**params)

@@ -55,7 +55,18 @@ def load_core_models():
     logger.info("Loading core models...")
 
     try:
-        llm_engine.load()
+        # for llama.cpp
+        # llm_engine.load()
+        # For Ollama
+        ok = llm_engine.health_check()
+        if not ok:
+            logger.error(
+                "Ollama is not running or model '{}' is not pulled. "
+                "Start Ollama with: ollama serve   "
+                "Pull model with: ollama pull {}",
+                settings.llm_model, settings.llm_model
+            )
+            raise RuntimeError("Ollama unavailable — cannot start assistant.")
     except Exception as e:
         logger.error("LLM load failed: {}", e)
 
@@ -109,8 +120,10 @@ async def run_voice():
     from app.memory.manager import memory_manager
     from app.audio.microphone import microphone
     from app.pipeline import pipeline
-
+    from app.memory.session_store import init_session_db
+    
     await memory_manager.initialize()
+    await init_session_db()
     load_core_models()
     load_voice_models()
 
@@ -126,8 +139,10 @@ async def run_voice():
 async def run_terminal():
     from app.memory.manager import memory_manager
     from app.pipeline import pipeline
-
+    from app.memory.session_store import init_session_db
+    
     await memory_manager.initialize()
+    await init_session_db()
     load_core_models()
 
     print("\n" + "═" * 55)
@@ -181,12 +196,13 @@ async def run_terminal():
 async def run_query(query: str):
     from app.memory.manager import memory_manager
     from app.pipeline import pipeline
-
+    from app.memory.session_store import init_session_db
+    
     await memory_manager.initialize()
+    await init_session_db()
     load_core_models()
 
     response = await pipeline.process_text_input(query)
-    print(response)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
