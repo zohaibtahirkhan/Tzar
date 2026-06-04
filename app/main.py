@@ -56,17 +56,17 @@ def load_core_models():
 
     try:
         # for llama.cpp
-        # llm_engine.load()
+        llm_engine.load()
         # For Ollama
-        ok = llm_engine.health_check()
-        if not ok:
-            logger.error(
-                "Ollama is not running or model '{}' is not pulled. "
-                "Start Ollama with: ollama serve   "
-                "Pull model with: ollama pull {}",
-                settings.llm_model, settings.llm_model
-            )
-            raise RuntimeError("Ollama unavailable — cannot start assistant.")
+        # ok = llm_engine.health_check()
+        # if not ok:
+        #     logger.error(
+        #         "Ollama is not running or model '{}' is not pulled. "
+        #         "Start Ollama with: ollama serve   "
+        #         "Pull model with: ollama pull {}",
+        #         settings.llm_model, settings.llm_model
+        #     )
+        #     raise RuntimeError("Ollama unavailable — cannot start assistant.")
     except Exception as e:
         logger.error("LLM load failed: {}", e)
 
