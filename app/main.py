@@ -45,6 +45,14 @@ def parse_args():
     parser.add_argument("--log-level", type=str, default="INFO")
     return parser.parse_args()
 
+async def initialize_mcp():
+    """Connect to MCP servers if enabled."""
+    if settings.mcp_enabled:
+        from app.tools.mcp_client import mcp_registry
+        mcp_registry.configure_from_env()
+        results = await mcp_registry.connect_all()
+        for srv, ok in results.items():
+            logger.info("MCP '{}': {}", srv, "connected" if ok else "FAILED")
 
 def load_core_models():
     """Load LLM, STT, and TTS models synchronously at startup."""
@@ -124,6 +132,8 @@ async def run_voice():
     
     await memory_manager.initialize()
     await init_session_db()
+    await initialize_mcp()
+    
     load_core_models()
     load_voice_models()
 
@@ -143,6 +153,8 @@ async def run_terminal():
     
     await memory_manager.initialize()
     await init_session_db()
+    await initialize_mcp()
+    
     load_core_models()
 
     print("\n" + "═" * 55)
@@ -200,6 +212,8 @@ async def run_query(query: str):
     
     await memory_manager.initialize()
     await init_session_db()
+    await initialize_mcp()
+    
     load_core_models()
 
     response = await pipeline.process_text_input(query)

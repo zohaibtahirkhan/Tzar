@@ -7,9 +7,11 @@ Simple / conversational turns skip it entirely for latency.
 Architecture:
   User input
     ↓
-  Complexity classifier (fast, no LLM)
-    ↓ complex?
-  Planner LLM call → {goal, steps[], required_tools[]}
+  Intent Classifier  (app/intent.py — fast, no LLM)
+    ↓
+  CHAT/MEMORY/TOOL → skip planner, direct to pipeline
+  PLANNING         → Planner LLM call → {goal, steps[], required_tools[]}
+  RESEARCH         → Research Agent   (app/agents/researcher.py)
     ↓
   Pipeline executes steps in order, with plan in context
 """
@@ -18,40 +20,18 @@ import re
 from dataclasses import dataclass, field
 from loguru import logger
 
-
 # ─── Complexity classifier ────────────────────────────────────────────────────
-
-# Keywords that signal multi-step work
-_COMPLEX_SIGNALS = [
-    "create", "write", "build", "research", "summarise", "summarize",
-    "find and", "search and", "read and", "compare", "organise", "organize",
-    "plan", "set up", "figure out", "go through", "analyze", "analyse",
-    "then", "after that", "and also", "multiple", "all the", "every",
-]
-
-_SIMPLE_SIGNALS = [
-    "what is", "what's", "who is", "when", "tell me", "yes", "no",
-    "thanks", "okay", "sure", "good morning", "hello", "hi",
-]
-
+# needs_planning() is now a thin shim over the Intent Classifier.
+# The real logic lives in app/intent.py.
 
 def needs_planning(user_text: str) -> bool:
     """
-    Fast heuristic — no LLM call.
-    Returns True if the request is likely multi-step.
+    Returns True if the request needs the Planner or Research Agent.
+    Delegates to the Intent Classifier — no LLM call.
     """
-    lower = user_text.lower().strip()
-
-    # Very short = simple
-    if len(lower.split()) < 5:
-        return False
-
-    # Strong simple signals = skip planner
-    if any(s in lower for s in _SIMPLE_SIGNALS):
-        return False
-
-    # Complex signals = plan
-    return any(s in lower for s in _COMPLEX_SIGNALS)
+    from app.intent import classify_intent, IntentType
+    intent = classify_intent(user_text)
+    return intent in (IntentType.PLANNING, IntentType.RESEARCH)
 
 
 # ─── Planner prompt ───────────────────────────────────────────────────────────
@@ -84,8 +64,11 @@ RULES:
   obsidian_list_vault, obsidian_reindex,
   kg_summary, kg_path, kg_neighbors, kg_orphans, kg_clusters, kg_timeline, kg_add,
   skill_load, skill_create, skill_update, skill_delete,
-  session_search, session_list
+  session_search, session_list,
+  research_agent (special: triggers multi-source web research + vault report)
 - complexity: low = 1 tool, medium = 2-3 tools, high = 4+ tools or unclear requirements.
+- Use research_agent when the user wants to research an external topic with multiple sources.
+  Do NOT use research_agent for simple web_search queries.
 """
 
 

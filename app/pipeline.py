@@ -38,7 +38,8 @@ from app.tools.router import ToolRouter, extract_tool_calls, strip_tool_calls
 from app.prompts.templates import build_system_prompt, format_tool_result
 from app.utils.timing import LatencyMetrics, Timer
 from app.memory.session_store import log_turn
-from app.planner import needs_planning, make_plan
+from app.intent import classify_intent, IntentType
+from app.planner import make_plan
 
 
 # ── Speech state set by LLM each turn ────────────────────────────────────────
@@ -106,8 +107,8 @@ class AssistantPipeline:
         """
         Full pipeline:
           1. Build prompt with selective memory
-          2. First LLM call → structured JSON
-          3. If tool requested → execute → second LLM call for final response
+          2. Classify Intent (NEW: Research vs Planning vs Chat)
+          3. If tool requested -> execute -> second LLM call for final response
           4. Extract spoken response text + store speech pacing metadata
           5. Return ONLY the spoken text (never raw JSON)
         """
@@ -115,9 +116,28 @@ class AssistantPipeline:
 
         memory_ctx, conv_history = await memory_manager.get_context(user_text)
 
-        # ── Planner: inject a step-by-step plan for complex requests ──────────
+        # ── NEW: Intent Classification (replaces needs_planning) ──
+        intent = classify_intent(user_text)
+
+        # ── NEW: Research Agent short-circuit ─────────────────────
+        if intent == IntentType.RESEARCH:
+            from app.agents.researcher import research_agent
+            logger.info("Intent: RESEARCH - routing to Research Agent")
+            
+            # Run the specialized research agent
+            response = await research_agent.run(user_text)
+            
+            # Archive the turn to memory (consistent with standard flow)
+            await memory_manager.add_turn(user_text, response)
+            await log_turn("user", user_text)
+            await log_turn("assistant", response)
+            
+            # Return the result directly (skips standard tool loop)
+            return response
+
+        # ── Existing planner branch (updated check) ───────────────────
         plan_context = ""
-        if needs_planning(user_text):
+        if intent == IntentType.PLANNING:
             plan = await make_plan(user_text, llm_engine.generate)
             plan_context = plan.to_context_string()
             if plan_context:
@@ -217,9 +237,33 @@ class AssistantPipeline:
 
         memory_ctx, conv_history = await memory_manager.get_context(user_text)
 
-        # ── Planner: inject a step-by-step plan for complex requests ──────────
+        # ── NEW: Intent Classification ─────────────────────────────────────────
+        intent = classify_intent(user_text)
+
+        # ── NEW: Research Agent short-circuit ─────────────────────────────────
+        if intent == IntentType.RESEARCH:
+            from app.agents.researcher import research_agent
+            logger.info("Intent: RESEARCH (stream) - routing to Research Agent")
+            
+            # Yield a status update so UI knows work is happening
+            yield "[Researching...]"
+            
+            response = await research_agent.run(user_text)
+            
+            # Archive
+            await memory_manager.add_turn(user_text, response)
+            await log_turn("user", user_text)
+            await log_turn("assistant", response)
+            
+            # Stream the result out sentence by sentence
+            for clause in split_into_sentences(response):
+                if clause.strip():
+                    yield clause
+            return # Stop execution here
+
+        # ── Planner for complex multi-step ────────────────────────────────
         plan_context = ""
-        if needs_planning(user_text):
+        if intent == IntentType.PLANNING:
             plan = await make_plan(user_text, llm_engine.generate)
             plan_context = plan.to_context_string()
             if plan_context:

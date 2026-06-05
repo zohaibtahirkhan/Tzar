@@ -129,7 +129,11 @@ tags: [{", ".join(tags)}]
     if wikilinks:
         relations = [(title, "links_to", link) for link in wikilinks]
         await kg_add_from_note(title, [title] + wikilinks, relations)
-
+    
+    if settings.kg_auto_extract:
+        from app.tools.knowledge_graph import kg_add_from_text
+        await kg_add_from_text(body, source_note=title)
+        
     return f"Note created: {title} (in {folder}/)"
 
 

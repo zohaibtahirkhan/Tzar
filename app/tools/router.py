@@ -44,12 +44,14 @@ from app.tools.obsidian import (
 )
 from app.tools.knowledge_graph import (
     kg_add_from_note,
+    kg_add_from_text,
     kg_find_path,
     kg_get_neighbors,
     kg_find_orphans,
     kg_find_clusters,
     kg_temporal_query,
     kg_graph_summary,
+    kg_semantic_expand,
 )
 from app.memory.hot_memory import (
     hot_memory_add,
@@ -64,6 +66,31 @@ from app.memory.skills import (
     skill_rewrite,
     skill_delete,
 )
+from app.tools.rag import (
+    doc_search,
+    unified_search,
+    ingest_document,
+    ingest_directory,
+    list_ingested_documents,
+    remove_document,
+)
+from app.memory.scoring import (
+    memory_scores_summary,
+    prune_low_score_memories,
+)
+from app.memory.projects import (
+    project_list,
+    project_new,
+    project_switch,
+    project_update,
+    project_archive,
+    project_status,
+)
+from app.memory.skill_learner import (
+    skill_learning_stats,
+    confirm_skill_proposal,
+)
+from app.tools.mcp_client import mcp_status, mcp_list_tools
 from app.memory.session_store import session_search, session_list
 
 # ─── Tool Registry ────────────────────────────────────────────────────────────
@@ -87,12 +114,14 @@ TOOL_REGISTRY: dict[str, Any] = {
     "obsidian_read_note":         obsidian_read_note,
     "obsidian_list_vault":        obsidian_list_vault,
     "kg_add":           kg_add_from_note,
+    "kg_add_text":      kg_add_from_text,
     "kg_path":          kg_find_path,
     "kg_neighbors":     kg_get_neighbors,
     "kg_orphans":       kg_find_orphans,
     "kg_clusters":      kg_find_clusters,
     "kg_timeline":      kg_temporal_query,
     "kg_summary":       kg_graph_summary,
+    "kg_expand":        kg_semantic_expand,
     "memory_write":   None,  
     "memory_remove":  None,
     "memory_replace": None,
@@ -104,6 +133,25 @@ TOOL_REGISTRY: dict[str, Any] = {
     "skill_delete":  None,
     "session_search": None,   
     "session_list":   None,
+    "doc_search":           doc_search,
+    "unified_search":       unified_search,
+    "ingest_document":      ingest_document,
+    "ingest_directory":     ingest_directory,
+    "list_documents":       list_ingested_documents,
+    "remove_document":      remove_document,
+    "mcp_status":       mcp_status,
+    "mcp_list_tools":   mcp_list_tools,
+    "memory_scores":    memory_scores_summary,
+    "memory_prune":     prune_low_score_memories,
+    "project_list":     project_list,
+    "project_new":      project_new,
+    "project_switch":   project_switch,
+    "project_update":   project_update,
+    "project_archive":  project_archive,
+    "project_status":   project_status,
+    "skill_learning_stats":    skill_learning_stats,
+    "confirm_skill_proposal":  confirm_skill_proposal,
+    # Dynamic MCP tools are added at startup by mcp_registry.connect_all()
     # memory tools are handled inline by ToolRouter (need memory_manager reference)
 }
 
@@ -135,6 +183,8 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "kg_clusters":  [],
     "kg_timeline":  ["node"],
     "kg_summary":   [],
+    "kg_add_text":      ["text"],
+    "kg_expand":        ["query"],
     "memory_write":   ["target", "content"],
     "memory_remove":  ["target", "substring"],
     "memory_replace": ["target", "old_substring", "new_content"],
@@ -146,6 +196,24 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "skill_delete":  ["name"],
     "session_search": ["query"],
     "session_list":   [],
+    "doc_search":           ["query"],
+    "unified_search":       ["query"],
+    "ingest_document":      ["path"],
+    "ingest_directory":     ["directory"],
+    "list_documents":       [],
+    "remove_document":      ["path"],
+    "mcp_status":       [],
+    "mcp_list_tools":   [],
+    "memory_scores": [],
+    "memory_prune":  [],
+    "project_list":    [],
+    "project_new":     ["name"],
+    "project_switch":  ["name"],
+    "project_update":  ["name"],
+    "project_archive": ["name"],
+    "project_status":  [],
+    "skill_learning_stats":   [],
+    "confirm_skill_proposal": [],
 }
 
 DESTRUCTIVE_TOOLS = {"delete_file", "write_file"}
@@ -284,6 +352,11 @@ class ToolRouter:
 
             elif tool_name == "session_list":
                 result = await session_list()
+                return {"tool": tool_name, "status": "ok", "result": result}
+            
+            elif tool_name.startswith("mcp_") and tool_name not in ("mcp_status", "mcp_list_tools"):
+                from app.tools.mcp_client import mcp_registry
+                result = await mcp_registry.call_tool(tool_name, params)
                 return {"tool": tool_name, "status": "ok", "result": result}
             
             # Registered async tools

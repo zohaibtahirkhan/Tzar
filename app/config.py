@@ -99,6 +99,37 @@ class Settings(BaseSettings):
     target_llm_first_token_ms: int = 1500
     target_tts_start_ms: int = 500
     target_full_response_ms: int = 4000
+    
+    # ─── RAG — Local Document Index ─────────────────────────────────
+    rag_documents_dir: Path = BASE_DIR / "Documents"   # default ingest folder
+    rag_chunk_words: int = 200
+    rag_chunk_overlap: int = 40
+
+    # ─── Knowledge Graph  ────────────────────────────────────────────
+    kg_db: Path = BASE_DIR / "data" / "knowledge_graph.db"
+    kg_auto_extract: bool = True     # auto-extract entities on obsidian_create_note
+
+    # ─── MCP  ────────────────────────────────────────────────────────
+    mcp_enabled: bool = False        # set True when you add servers
+    mcp_servers: str = "[]"          # JSON array of server configs (see mcp_client.py)
+    
+    # ─── Memory Scoring  ────────────────────────────────────────────
+    memory_score_weight_importance: float = 0.45
+    memory_score_weight_recency:    float = 0.30
+    memory_score_weight_confidence: float = 0.15
+    memory_score_weight_frequency:  float = 0.10
+    memory_recency_half_life_days:  float = 14.0
+    memory_prune_threshold:         float = 0.08
+    memory_prune_min_age_days:      int   = 7
+
+    # ─── Projects ──────────────────────────────────────────────────
+    projects_db: Path = BASE_DIR / "data" / "projects.db"
+    project_auto_detect: bool = True   # detect "continue X" in queries
+
+    # ─── Skill Auto-Learning ───────────────────────────────────────
+    skill_learning_enabled:   bool = True
+    skill_pattern_threshold:  int  = 3     # times seen before proposing
+    skill_min_sequence_len:   int  = 2
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

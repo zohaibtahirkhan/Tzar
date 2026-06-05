@@ -62,8 +62,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("TTS load failed: {}", e)
 
+    # ─── MCP Startup ───────────────────────────────────────────────
+    if settings.mcp_enabled:
+        from app.tools.mcp_client import mcp_registry
+        mcp_registry.configure_from_env()
+        results = await mcp_registry.connect_all()
+        for srv, ok in results.items():
+            logger.info("MCP '{}': {}", srv, "connected" if ok else "FAILED")
+    # ────────────────────────────────────────────────────────────────
+
     logger.info("Backend ready.")
     yield
+
+    # ─── MCP Shutdown ───────────────────────────────────────────────
+    if settings.mcp_enabled:
+        from app.tools.mcp_client import mcp_registry
+        await mcp_registry.disconnect_all()
+        logger.info("MCP servers disconnected.")
+    # ────────────────────────────────────────────────────────────────
 
     logger.info("Shutting down...")
 
