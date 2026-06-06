@@ -92,6 +92,7 @@ from app.memory.skill_learner import (
 )
 from app.tools.mcp_client import mcp_status, mcp_list_tools
 from app.memory.session_store import session_search, session_list
+from app.system_profiler import run_system_profile_tool
 
 # ─── Tool Registry ────────────────────────────────────────────────────────────
 
@@ -151,6 +152,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "project_status":   project_status,
     "skill_learning_stats":    skill_learning_stats,
     "confirm_skill_proposal":  confirm_skill_proposal,
+    "system_profile": run_system_profile_tool,
     # Dynamic MCP tools are added at startup by mcp_registry.connect_all()
     # memory tools are handled inline by ToolRouter (need memory_manager reference)
 }
@@ -214,6 +216,7 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "project_status":  [],
     "skill_learning_stats":   [],
     "confirm_skill_proposal": [],
+    "system_profile": [],
 }
 
 DESTRUCTIVE_TOOLS = {"delete_file", "write_file"}

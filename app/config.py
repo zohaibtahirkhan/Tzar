@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     skill_learning_enabled:   bool = True
     skill_pattern_threshold:  int  = 3     # times seen before proposing
     skill_min_sequence_len:   int  = 2
+ 
+    # ─── Multi-Agent Orchestrator ───────────────────────────────────────   
+    multi_agent_enabled: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

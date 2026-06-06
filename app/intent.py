@@ -199,6 +199,16 @@ _TOOL_SIGNALS: list[tuple[str, bool]] = [
     ("prune memories", False),
     ("skill learning", False),
     ("skill stats", False),
+    ("system profile", False),
+    ("what model", False),
+    ("suggest a model", False),
+    ("recommend a model", False),
+    ("what can my", False),
+    ("hardware profile", False),
+    ("check my system", False),
+    ("analyse my hardware", False),
+    ("analyze my hardware", False),
+    ("is my computer good enough", False),
 ]
 
 _PLANNING_SIGNALS: list[tuple[str, bool]] = [

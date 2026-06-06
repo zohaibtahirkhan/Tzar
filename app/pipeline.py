@@ -118,6 +118,18 @@ class AssistantPipeline:
 
         # ── NEW: Intent Classification (replaces needs_planning) ──
         intent = classify_intent(user_text)
+        
+        # ── Project Continuity auto-detect ───────────────────────────
+        from app.memory.projects import extract_project_name_from_query, project_switch
+        project_name = extract_project_name_from_query(user_text)
+        if project_name:
+            return await project_switch(project_name)
+
+        # ── Multi-Agent Orchestrator (opt-in) ───────────────────────
+        if settings.multi_agent_enabled:
+            from app.agents.orchestrator import orchestrator
+            logger.info("Multi-Agent mode enabled. Routing to Orchestrator.")
+            return await orchestrator.run(user_text, intent.value)
 
         # ── NEW: Research Agent short-circuit ─────────────────────
         if intent == IntentType.RESEARCH:
@@ -240,6 +252,18 @@ class AssistantPipeline:
         # ── NEW: Intent Classification ─────────────────────────────────────────
         intent = classify_intent(user_text)
 
+        # ── Project Continuity auto-detect ───────────────────────────
+        from app.memory.projects import extract_project_name_from_query, project_switch
+        project_name = extract_project_name_from_query(user_text)
+        if project_name:
+            return await project_switch(project_name)
+
+        # ── Multi-Agent Orchestrator (opt-in) ───────────────────────
+        if settings.multi_agent_enabled:
+            from app.agents.orchestrator import orchestrator
+            logger.info("Multi-Agent mode enabled. Routing to Orchestrator.")
+            return await orchestrator.run(user_text, intent.value)
+        
         # ── NEW: Research Agent short-circuit ─────────────────────────────────
         if intent == IntentType.RESEARCH:
             from app.agents.researcher import research_agent

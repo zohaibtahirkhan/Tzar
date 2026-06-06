@@ -134,7 +134,11 @@ AVAILABLE TOOLS:
 - project_status: params: {{}} — show currently active project and its context
 - skill_learning_stats: params: {{}} — show skill auto-learning status and top detected patterns
 - confirm_skill_proposal: params: {{"accepted": true}} — accept or reject a skill proposal
-
+- system_profile: params: {{}} — analyse this machine's hardware and recommend
+  the best LLM, quantisation, STT model, GPU settings, and .env config.
+  Use when the user asks "what model should I use", "is my hardware good enough",
+  "what can my computer run", "suggest a model for me", or similar.
+  
 NOTE — Research Agent: When the user asks to "research X", "investigate X", "what's new in X", or
 "compare X vs Y", the pipeline automatically invokes the Research Agent before you respond. You will
 receive the research summary as part of your context. Synthesise it naturally in your spoken response.

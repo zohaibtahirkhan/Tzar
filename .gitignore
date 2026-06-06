@@ -8,3 +8,22 @@ venv/
 models/*.gguf
 data/logs/
 data/cache/
+
+# UI
+node_modules/
+dist/
+target/
+
+.env
+.env.*
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
+
+*.log
+coverage/
+.vite/
+*.tsbuildinfo
