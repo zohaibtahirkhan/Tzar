@@ -1,14 +1,14 @@
 """
 app/agents/orchestrator.py
 
-Multi-Agent Layer — Phase 10.
+Multi-Agent Layer
 
 Five specialised agents coordinate through a shared AgentContext.
 No external message bus needed at this scale — pure async Python.
 
 Agents:
   PlannerAgent      — decomposes the user goal into AgentTasks
-  ResearcherAgent   — wraps the Phase 2 ResearchAgent for web research
+  ResearcherAgent   — wraps the ResearchAgent for web research
   ExecutorAgent     — runs tool calls from the plan, one step at a time
   MemoryCuratorAgent— runs after every response: scores, prunes, archives
   SkillBuilderAgent — observes executor sequences, feeds skill_learner
@@ -221,7 +221,7 @@ class PlannerAgent(BaseAgent):
 
 class ResearcherAgent(BaseAgent):
     """
-    Handles RESEARCH tasks by delegating to the Phase 2 ResearchAgent.
+    Handles RESEARCH tasks by delegating to the ResearchAgent.
     Stores the summary in ctx.research_summary.
     """
     name = "ResearcherAgent"
@@ -296,8 +296,8 @@ class MemoryCuratorAgent(BaseAgent):
     Runs after every response. Non-blocking — fires as a background task.
 
     Responsibilities:
-      1. Score any newly written memories (Phase 6)
-      2. Log the tool sequence to skill_learner (Phase 8)
+      1. Score any newly written memories
+      2. Log the tool sequence to skill_learner
       3. Periodically prune low-score memories (every 50 runs)
     """
     name = "MemoryCuratorAgent"

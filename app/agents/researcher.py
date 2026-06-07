@@ -1,5 +1,5 @@
 """
-Research Agent — Phase 2.
+Research Agent
 
 Turns a research question into a structured, multi-source report
 and optionally saves it to the Obsidian vault.
@@ -218,28 +218,36 @@ class ResearchAgent:
             return [question]
 
     # ── Step 2: Multi-search ──────────────────────────────────────────────
-
     async def _multi_search(self, queries: list[str]) -> list[SearchResult]:
-        """Run all queries concurrently, deduplicate by URL."""
-        tasks = [self._search_one(q) for q in queries]
-        results_per_query = await asyncio.gather(*tasks, return_exceptions=True)
-
+        """
+        Run queries SEQUENTIALLY with a delay to prevent 202 Ratelimit errors.
+        """
         seen_urls: set[str] = set()
         combined: list[SearchResult] = []
 
-        for batch in results_per_query:
-            if isinstance(batch, Exception):
-                logger.warning("Search batch failed: {}", batch)
+        for i, query in enumerate(queries):
+            # Run searches one by one
+            try:
+                results = await self._search_one(query)
+                
+                for r in results:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        combined.append(r)
+                
+                # CRITICAL: Sleep between requests to avoid rate limits
+                # Wait 3-4 seconds between requests
+                if i < len(queries) - 1:
+                    await asyncio.sleep(3.5)
+                    
+            except Exception as e:
+                logger.warning("Search batch failed: {}", e)
                 continue
-            for r in batch:
-                if r.url not in seen_urls:
-                    seen_urls.add(r.url)
-                    combined.append(r)
 
         return combined
 
     async def _search_one(self, query: str) -> list[SearchResult]:
-        """Single DuckDuckGo search, returns SearchResult list."""
+        """Single DuckDuckGo search using the 'lite' backend to avoid blocking."""
         from app.config import settings
 
         if not settings.web_search_enabled:
@@ -254,14 +262,21 @@ class ResearchAgent:
             def _do_search():
                 results = []
                 with DDGS() as ddgs:
-                    for r in ddgs.text(query, max_results=self._max_results_per_query):
-                        results.append(
-                            SearchResult(
-                                title=r.get("title", ""),
-                                url=r.get("href", ""),
-                                snippet=r.get("body", "")[:self._max_snippet_chars],
+                    # Using backend="lite" helps avoid the heavy HTML scraping blocks
+                    search_gen = ddgs.text(
+                        query, 
+                        max_results=self._max_results_per_query,
+                        backend="lite"  # <--- Key change
+                    )
+                    if search_gen:
+                        for r in search_gen:
+                            results.append(
+                                SearchResult(
+                                    title=r.get("title", ""),
+                                    url=r.get("href", ""),
+                                    snippet=r.get("body", "")[:self._max_snippet_chars],
+                                )
                             )
-                        )
                 return results
 
             return await loop.run_in_executor(None, _do_search)

@@ -1,7 +1,7 @@
 """
 app/memory/scoring.py
 
-Memory Scoring — Phase 6.
+Memory Scoring
 
 Every memory gets four scores:
   importance  — how consequential is this fact? (0.0–1.0)

@@ -1,7 +1,7 @@
 """
 app/tools/rag/search.py
 
-Hybrid document search — Phase 3.
+Hybrid document search
 
 Combines:
   1. Semantic similarity (MiniLM cosine similarity over doc_vectors)

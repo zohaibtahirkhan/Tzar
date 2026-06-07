@@ -1,5 +1,5 @@
 """
-Tests for Phase 10 (Multi-Agent Orchestrator) and System Profiler.
+Tests for Multi-Agent Orchestrator and System Profiler.
 
 Run: pytest tests/test_11_multiagent_profiler.py -v
 
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 10 — Multi-Agent Orchestrator
+# Multi-Agent Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestAgentContext:

@@ -80,6 +80,21 @@ class LLMEngine:
             logger.error("Ollama health check failed: {}", e)
             return False
 
+    def is_loaded(self) -> bool:
+        """
+        Check if llm has been loaded or not
+        """
+        if settings.LLM_BACKEND == "ollama":
+            try:
+                self.health_check()
+            except:
+                print("Please pull or run Model")
+        if settings.LLM_BACKEND == "llamacpp":
+            try:
+                return self._llm is not None
+            except:
+                self.load()
+            
     def _build_payload(
         self,
         messages: list[dict],

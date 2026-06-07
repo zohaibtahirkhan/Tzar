@@ -1,5 +1,5 @@
 """
-Tests for Phase 1 (Intent Classifier) and Phase 2 (Research Agent).
+Tests forIntent Classifier and Research Agent.
 
 Run with:
     pytest tests/test_08_intent_research.py -v
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.intent import classify_intent, IntentType, needs_planning
 
 
-# ─── Phase 1: Intent Classifier ──────────────────────────────────────────────
+# ─── Intent Classifier ──────────────────────────────────────────────
 
 class TestChatIntent:
     """Short, conversational inputs should always → CHAT."""
@@ -193,7 +193,7 @@ class TestIntentLatency:
         assert elapsed_ms < 100, f"Classifier too slow: {elapsed_ms:.1f}ms for 500 calls"
 
 
-# ─── Phase 2: Research Agent (offline / mock tests) ──────────────────────────
+# ─── Research Agent (offline / mock tests) ──────────────────────────
 
 class TestResearchAgentParsing:
     """Unit tests for the JSON parsing helpers — no network needed."""

@@ -1,7 +1,7 @@
 """
 app/tools/rag/ingestor.py
 
-Document ingestion pipeline for Phase 3 — Local Document RAG.
+Document ingestion pipeline — Local Document RAG.
 
 Supports: PDF, DOCX, EPUB, Markdown, plain text.
 Chunks content, embeds with the same MiniLM model already used for

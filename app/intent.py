@@ -1,5 +1,5 @@
 """
-Intent Classifier — Phase 1 of the intelligence upgrade.
+Intent Classifier
 
 Replaces the binary needs_planning() heuristic with a proper
 5-way classification that routes each query to the right engine
@@ -16,7 +16,7 @@ Architecture:
     CHAT     → direct LLM (no planner, no tools)
     MEMORY   → hot_memory recall + direct LLM
     TOOL     → tool router + LLM
-    RESEARCH → Research Agent (Phase 2)
+    RESEARCH → Research Agent
     PLANNING → Planner LLM call → tool-executing LLM
 
 Integration point:  app/pipeline.py  process_text_input()

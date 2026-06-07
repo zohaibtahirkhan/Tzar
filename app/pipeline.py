@@ -256,14 +256,19 @@ class AssistantPipeline:
         from app.memory.projects import extract_project_name_from_query, project_switch
         project_name = extract_project_name_from_query(user_text)
         if project_name:
-            return await project_switch(project_name)
+            result = await project_switch(project_name)
+            yield result
+            return
 
         # ── Multi-Agent Orchestrator (opt-in) ───────────────────────
         if settings.multi_agent_enabled:
             from app.agents.orchestrator import orchestrator
             logger.info("Multi-Agent mode enabled. Routing to Orchestrator.")
-            return await orchestrator.run(user_text, intent.value)
-        
+            result = await orchestrator.run(user_text, intent.value)
+
+            yield result
+            return
+                
         # ── NEW: Research Agent short-circuit ─────────────────────────────────
         if intent == IntentType.RESEARCH:
             from app.agents.researcher import research_agent

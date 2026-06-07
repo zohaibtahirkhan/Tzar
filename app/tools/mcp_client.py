@@ -1,7 +1,7 @@
 """
 app/tools/mcp_client.py
 
-MCP (Model Context Protocol) Client — Phase 5.
+MCP (Model Context Protocol) Client
 
 Connects to any MCP server over HTTP/SSE or stdio.
 Discovers tools dynamically, wraps them as async callables,

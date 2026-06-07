@@ -1,7 +1,7 @@
 """
 app/memory/projects.py
 
-Project Continuity — Phase 7. The "killer feature."
+Project Continuity. The "killer feature."
 
 Tracks active projects and auto-loads their full context on demand:
   notes, memories, graph nodes, open tasks, recent conversations.

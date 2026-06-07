@@ -1,4 +1,4 @@
-# Hafiz — Desktop UI (Phase 9)
+# Hafiz — Desktop UI
 
 React + Tauri frontend for the Hafiz assistant backend.
 

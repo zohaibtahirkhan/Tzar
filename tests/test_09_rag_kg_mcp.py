@@ -1,5 +1,5 @@
 """
-Tests for Phase 3 (RAG), Phase 4 (Knowledge Graph), Phase 5 (MCP).
+Tests for RAG, Knowledge Graph, MCP.
 
 Run: pytest tests/test_09_rag_kg_mcp.py -v
 
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 3 — RAG: Ingestor
+# RAG: Ingestor
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestChunking:
@@ -218,7 +218,7 @@ class TestDocVectorDB:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 3 — RAG: Hybrid Search (BM25 + RRF)
+# RAG: Hybrid Search (BM25 + RRF)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestBM25:
@@ -310,7 +310,7 @@ class TestTokeniser:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 4 — Knowledge Graph
+# Knowledge Graph
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture
@@ -472,7 +472,7 @@ class TestKGOperations:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 5 — MCP Client
+# MCP Client
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestMCPRegistryConfig:

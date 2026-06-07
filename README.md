@@ -1,111 +1,493 @@
-# Local Offline Voice Assistant — Second Brain Edition
+# Hafiz — Local AI Assistant
 
-A fully local, privacy-first AI voice assistant with Obsidian integration, Knowledge Graph engine, self-improving skills, and a curator-gated memory system. Runs entirely on-device. Nothing leaves your machine unless you explicitly enable web search.
+A fully local, privacy-first AI assistant with voice I/O, Obsidian integration, Knowledge Graph, RAG over local documents, multi-agent orchestration, and a self-improving skills system. Runs entirely on-device. Nothing leaves your machine unless you explicitly enable web search.
+
+Named after **حافظ** — the keeper, the one who preserves.
 
 ---
 
 ## Hardware Target
 
-| Component | Spec |
-|---|---|
-| CPU | Intel i5-1235U |
-| RAM | 16 GB |
-| GPU | Intel Integrated (CPU-only inference) |
-| OS | Ubuntu 24.04 |
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| CPU | i5 / Ryzen 5, 4 cores | i7 / Ryzen 7, 8+ cores |
+| RAM | 8 GB | 16–32 GB |
+| GPU | None (CPU-only) | NVIDIA 8GB+ VRAM or Apple Silicon |
+| OS | Ubuntu 22.04+ | Ubuntu 24.04 / macOS 14+ |
+| Disk | 10 GB free | 30 GB free |
+
+Not sure what model your hardware can run? See [System Profiler](#system-profiler).
 
 ---
 
 ## Architecture
 
 ```
-Mic
- ↓
-Silero VAD          (end-of-utterance detection)
- ↓
-OpenWakeWord        ("Hey Zohaib")
- ↓
-Faster-Whisper STT
- ↓
-needs_planning()?
- ├─ yes → Planner LLM call → Plan injected into prompt
- └─ no  → skip
- ↓
-Conversation Agent  (structured JSON, no thought leakage, confidence score)
- ↓
-Tool Router ─┬── Filesystem Sandbox
-             ├── Long-Term Memory (SQLite FTS5)
-             ├── Hot Memory (MEMORY.md + USER.md — always-on curated facts)
-             │    └── memory_write → Curator Agent → store / reject / consolidate
-             ├── Skills (procedural memory — SKILL.md files, self-improving)
-             ├── Session Archive (full conversation FTS5 search)
-             ├── Obsidian Vault (notes, daily log, semantic search)
-             ├── Knowledge Graph (entities, relations, pathfinding, clustering)
-             └── Web Search (opt-in, DuckDuckGo)
- ↓
-Kokoro TTS  (sentence-by-sentence streaming, respects interruptible flag)
- ↓
-Speaker
+Voice Input (mic)
+    ↓
+Wake Word Detector (openWakeWord)
+    ↓
+VAD (Silero)          ← detects end of speech
+    ↓
+STT (faster-whisper)  ← Whisper small, multilingual
+    ↓
+Intent Classifier     ← 0ms, rule-based, no LLM call
+    ↓
+┌─────────────────────────────────────┐
+│  CHAT    → direct LLM               │
+│  MEMORY  → hot memory recall + LLM  │
+│  TOOL    → tool router + LLM        │
+│  RESEARCH→ Research Agent           │
+│  PLANNING→ Planner + tool loop      │
+└─────────────────────────────────────┘
+    ↓
+[Optional] Multi-Agent Orchestrator
+    ↓
+FastAPI Backend (port 8000)
+    ↓
+TTS (Kokoro)          ← streamed sentence-by-sentence
+    ↓
+Audio Output (speaker)
 ```
-
----
-
-## Tech Stack
-
-| Component | Technology |
-|---|---|
-| LLM | Qwen2.5-3B-Instruct (Q4_K_M GGUF via llama.cpp) or any Ollama model |
-| STT | Faster-Whisper (small model, CPU int8) |
-| TTS | Kokoro TTS |
-| VAD | Silero VAD |
-| Wake Word | OpenWakeWord |
-| Backend | FastAPI + asyncio |
-| Memory (hot) | MEMORY.md + USER.md (curated, always-on, char-limited) |
-| Memory (cold) | SQLite with FTS5 (aiosqlite) |
-| Session Archive | SQLite FTS5 (every conversation turn, searchable) |
-| Skills | SKILL.md files (procedural memory, self-improving) |
-| Obsidian Search | sentence-transformers (all-MiniLM-L6-v2) + SQLite vectors |
-| Knowledge Graph | SQLite adjacency table + label propagation clustering |
-| Web Search | DuckDuckGo (disabled by default) |
 
 ---
 
 ## Quick Start
 
-### 1. Run setup
+### 1. Install dependencies
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+# Python deps
+pip install -r requirements.txt
+
+# System deps (Ubuntu 24.04)
+sudo apt install libwebkit2gtk-4.1-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev portaudio19-dev
+
+# Ollama (recommended LLM backend)
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:7b
 ```
 
-Downloads the LLM model (~2 GB), installs system packages, builds llama.cpp, and creates the Python virtual environment.
-
-### 2. Activate the environment
+### 2. Configure
 
 ```bash
-source venv/bin/activate
+cp .env.example .env
+# Edit .env — set your Obsidian vault path, model choice, etc.
 ```
 
-### 3. Choose a mode
-
-**Terminal chat** (no microphone needed):
+Minimum required settings:
 ```bash
-python -m app.main --mode terminal
+OBSIDIAN_VAULT_PATH=/home/yourname/Documents/ObsidianVault
+LLM_BACKEND=ollama
+LLM_MODEL=qwen2.5:7b
+STT_MODEL=small
 ```
 
-**Voice mode** (microphone + speaker):
-```bash
-python -m app.main --mode voice
-```
+### 3. Run
 
-**API server** (for integrations):
 ```bash
+# API server (for UI or automation)
 python -m app.main --mode server
+
+# Voice loop (mic + speaker)
+python -m app.main --mode voice
+
+# Terminal chat
+python -m app.main --mode terminal
+
+# Single query and exit
+python -m app.main --mode query --query "What's in my daily note?"
 ```
 
-**Single query and exit:**
+### 4. Desktop UI
+
 ```bash
-python -m app.main --mode query --query "List my workspace files"
+cd ui
+npm install
+npm run dev          # browser at http://localhost:3000 (backend must be running)
+npm run tauri:dev    # native Tauri window (requires Rust)
+```
+
+---
+
+## System Profiler
+
+Hafiz can analyse your hardware and recommend the best model configuration:
+
+```bash
+python -m app.system_profiler
+```
+
+Or say: **"What model should I use?"** / **"Analyse my hardware"**
+
+The profiler detects RAM, VRAM, CPU cores, AVX support, and Ollama availability, then outputs:
+
+- The best LLM to use (Qwen2.5, Llama 3.1, Mistral, Phi, Gemma, DeepSeek-R1)
+- Quantisation tier (Q3 / Q4 / Q5 based on available RAM)
+- Whether GPU offload is viable (`n_gpu_layers`)
+- Whisper model tier (tiny / base / small / medium / large-v3)
+- A ready-to-paste `.env` snippet
+
+---
+
+## Intelligence Layers
+
+Hafiz is built in phases of increasing capability. All are opt-in and backward-compatible.
+
+### Intent Classifier (`app/intent.py`)
+
+Classifies every input before any LLM is called. Zero latency — pure regex, no model.
+
+| Intent | Example | Route |
+|--------|---------|-------|
+| CHAT | "what is RAG?" | Direct LLM |
+| MEMORY | "remember I prefer dark mode" | Hot memory + LLM |
+| TOOL | "create a note about transformers" | Tool router |
+| RESEARCH | "research latest llama.cpp updates" | Research Agent |
+| PLANNING | "find the file and then create a note" | Planner + tool loop |
+
+### Research Agent (`app/agents/researcher.py`)
+
+Multi-source web research pipeline. Triggered automatically for RESEARCH intent.
+
+```
+Goal → LLM generates 3-5 search queries → concurrent DuckDuckGo searches
+     → top pages fetched and extracted → LLM synthesises findings
+     → structured markdown report → auto-saved to Obsidian vault (Research/)
+     → short spoken summary returned
+```
+
+### Local Document RAG (`app/tools/rag/`)
+
+Ingest your own files and query them with natural language.
+
+Supported formats: **PDF, DOCX, EPUB, Markdown, TXT**
+
+Retrieval: **BM25 keyword + MiniLM semantic similarity, fused with Reciprocal Rank Fusion (RRF)**
+
+```bash
+# Via chat
+"ingest document /path/to/contract.pdf"
+"what did the Databricks contract say about Genie?"
+
+# Via UI
+# Open the Documents panel → paste path → Ingest
+```
+
+Documents are stored in `doc_vectors` table alongside Obsidian note embeddings. `unified_search` queries both at once.
+
+### Knowledge Graph (`app/tools/knowledge_graph.py`)
+
+SQLite-backed directed property graph. Auto-extracts entities from every note saved.
+
+```
+obsidian_create_note() → entity extraction (CamelCase, acronyms, quoted phrases)
+                       → kg_add_from_text() → graph update
+```
+
+Tools:
+
+| Tool | Description |
+|------|-------------|
+| `kg_summary` | Node/edge counts, top connected entities |
+| `kg_neighbors` | BFS neighbours of a node (configurable depth) |
+| `kg_path` | Shortest path between two nodes |
+| `kg_clusters` | Connected clusters via Union-Find |
+| `kg_timeline` | When a concept first appeared |
+| `kg_expand` | Semantic graph expansion — vector search + graph walk |
+
+### MCP Integration (`app/tools/mcp_client.py`)
+
+Connects to any MCP server (HTTP/SSE or stdio). Tools are discovered dynamically and auto-registered.
+
+```bash
+# .env
+MCP_SERVERS='[
+  {"name": "gmail",    "transport": "http", "url": "http://localhost:3001/mcp"},
+  {"name": "calendar", "transport": "http", "url": "http://localhost:3002/mcp"},
+  {"name": "github",   "transport": "stdio", "command": "npx @modelcontextprotocol/server-github"}
+]'
+MULTI_AGENT_ENABLED=false   # set true to enable
+```
+
+### Memory Scoring (`app/memory/scoring.py`)
+
+Every memory gets four scores computed on write:
+
+| Score | How | Weight |
+|-------|-----|--------|
+| Importance | Rule-based: preferences/names → 0.9, casual → 0.1 | 45% |
+| Recency | Exponential decay, 14-day half-life | 30% |
+| Confidence | Hedge detection ("I think maybe") | 15% |
+| Frequency | Log-normalised recall count (N_MAX=50) | 10% |
+
+Memories are ranked by composite score before LLM context injection. `memory_prune` removes anything below 0.08 older than 7 days.
+
+### Project Continuity (`app/memory/projects.py`)
+
+The "feels like Jarvis" feature. Tracks active projects and loads their full context on demand.
+
+```
+"Continue the AI assistant project."
+    ↓
+project_switch("AI Assistant")
+    ↓ (parallel)
+  ├── Obsidian project folder notes
+  ├── Open tasks (- [ ] items extracted)
+  ├── KG entity neighbours
+  └── Semantic memory matches
+    ↓
+Full context injected into every subsequent system prompt
+```
+
+Auto-detected from phrases like: *"continue X"*, *"switch to X"*, *"work on X"*, *"resume X"*.
+
+### Skill Auto-Learning (`app/memory/skill_learner.py`)
+
+Observes every successful tool sequence. At 3 occurrences, proposes it as a named skill.
+
+```
+Task completes → sequence normalised (noise removed, adjacent deduped)
+             → hash + count stored
+             → count ≥ 3? → proposal generated
+             → "I noticed you always do X → Y → Z. Save as skill?"
+             → yes → skill_create() / no → candidate cleared
+```
+
+### Desktop UI (`ui/`)
+
+React + Tauri frontend. Connects to the FastAPI backend.
+
+| Panel | What it does |
+|-------|-------------|
+| Chat | SSE streaming, voice input (WebSocket), expandable tool results, stop button |
+| Memory | Cards with scoring bars, add/delete/search/prune, category filter |
+| Graph | D3 force-directed KG, click to expand, path finder, zoom/pan |
+| Documents | Ingest files/dirs, doc-only or unified search, remove from index |
+| Skills | Detected patterns, proposal status |
+| Projects | Create/switch projects, click to load context into chat |
+| System | Hardware profiler, model recommendation, copy `.env` snippet |
+| Settings | LLM/STT/TTS status, web search toggle, multi-agent toggle, MCP status |
+
+```bash
+cd ui
+npm install
+npm run dev        # http://localhost:3000 (no Rust needed)
+npm run tauri:dev  # native window
+npm run tauri:build # .AppImage / .deb / .dmg / .exe
+```
+
+### Multi-Agent Layer (`app/agents/orchestrator.py`)
+
+Five agents coordinating through a shared `AgentContext`. Opt-in via `.env`.
+
+```
+User text
+    ↓
+PlannerAgent      → maps intent to AgentTasks
+    ↓ (parallel)
+ResearcherAgent   → handles RESEARCH tasks
+ExecutorAgent     → runs TOOL tasks in dependency order
+    ↓
+Response synthesis (LLM)
+    ↓ (background, non-blocking)
+MemoryCuratorAgent → scores memories, logs to skill learner, prunes every 50 turns
+SkillBuilderAgent  → checks for pending skill proposals, appends notification
+```
+
+Enable:
+```bash
+# .env
+MULTI_AGENT_ENABLED=true
+```
+
+---
+
+## API Reference
+
+All endpoints on `http://127.0.0.1:8000`.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | LLM/STT/TTS status, web search flag, workspace path |
+| `POST` | `/chat` | Text chat (blocking, returns full response) |
+| `POST` | `/chat/stream` | Text chat (SSE streaming, `data: {"token": "..."}`) |
+| `POST` | `/tool` | Direct tool invocation `{"tool": "name", "param": "val"}` |
+| `GET` | `/memory` | Query memories (`?q=search&category=preference`) |
+| `POST` | `/memory` | Save memory `{"category": "note", "content": "..."}` |
+| `DELETE` | `/memory/{id}` | Delete a memory by ID |
+| `POST` | `/settings/web-search` | Toggle web search `{"enabled": true}` |
+| `WS` | `/ws/audio` | WebSocket: binary float32 PCM in, JSON + PCM out |
+
+### WebSocket protocol
+
+**Client → Server**
+- Binary frames: 16kHz float32 PCM audio chunks (512 samples)
+- Text frame: `{"cmd": "stop"}` or `{"cmd": "text", "data": "message"}`
+
+**Server → Client**
+- `{"type": "status", "data": "transcribing" | "thinking"}`
+- `{"type": "transcript", "data": "what the user said"}`
+- `{"type": "response", "data": "assistant reply"}`
+- `{"type": "error", "data": "error message"}`
+- Binary frames: 24kHz float32 PCM TTS audio
+
+---
+
+## Tool Reference
+
+All tools callable via `POST /tool` or from the LLM.
+
+### File System
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `read_file` | `path` | Read a file from the workspace |
+| `write_file` | `path`, `content` | Write a file |
+| `append_file` | `path`, `content` | Append to a file |
+| `list_directory` | `path` | List directory contents |
+| `delete_file` | `path` | Delete a file |
+
+### Web
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `web_search` | `query` | DuckDuckGo search (requires web search enabled) |
+
+### Obsidian
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `obsidian_create_note` | `title`, `content`, `folder?` | Create a note |
+| `obsidian_append_daily` | `content` | Append to today's daily note |
+| `obsidian_capture_idea` | `idea` | Save to Ideas folder |
+| `obsidian_semantic_search` | `query`, `top_k?` | MiniLM semantic search |
+| `obsidian_keyword_search` | `query` | BM25 keyword search |
+| `obsidian_read_note` | `title` | Read a specific note |
+| `obsidian_list_vault` | — | List all notes |
+| `obsidian_get_related` | `title` | Find related notes |
+| `obsidian_morning_briefing` | — | Daily summary |
+| `obsidian_reindex` | — | Rebuild vector index |
+
+### RAG Documents
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `doc_search` | `query`, `top_k?`, `source_filter?` | Hybrid search over ingested docs |
+| `unified_search` | `query`, `top_k?` | Search docs + Obsidian notes together |
+| `ingest_document` | `path` | Index a single file |
+| `ingest_directory` | `directory`, `recursive?` | Bulk index a folder |
+| `list_documents` | — | List all indexed documents |
+| `remove_document` | `path` | Remove a document from the index |
+
+### Knowledge Graph
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `kg_summary` | — | Graph stats (nodes, edges, top connected) |
+| `kg_neighbors` | `node`, `depth?` | BFS neighbours |
+| `kg_path` | `source`, `target` | Shortest path between nodes |
+| `kg_clusters` | `min_size?` | Find connected clusters |
+| `kg_timeline` | `node` | When a concept appeared and how it evolved |
+| `kg_orphans` | — | Nodes with no connections |
+| `kg_expand` | `query` | Semantic vector search + graph walk |
+| `kg_add_text` | `text`, `source_note?` | Auto-extract and add entities from text |
+
+### MCP
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `mcp_status` | — | Connected servers and their tools |
+| `mcp_list_tools` | — | All registered MCP tool names |
+| `mcp_{server}_{tool}` | varies | Dynamically registered MCP tools |
+
+### Memory
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `memory_scores` | — | Scoring statistics across all memories |
+| `memory_prune` | — | Remove low-score stale memories |
+| `memory_write` | `target`, `content` | Write to hot memory (curator-gated) |
+| `memory_read` | `target?` | Read hot memory |
+| `memory_remove` | `target`, `substring` | Remove from hot memory |
+| `save_memory` | `category`, `content` | Save to long-term memory |
+| `recall_memory` | `query` | Recall from long-term memory |
+
+### Projects
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `project_list` | — | All projects with status and last opened |
+| `project_new` | `name`, `description?` | Create a project |
+| `project_switch` | `name` | Load full project context |
+| `project_update` | `name`, `description?`, `status?` | Update project |
+| `project_archive` | `name` | Mark as archived |
+| `project_status` | — | Currently active project |
+
+### Skills
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `skill_load` | `name` | Load a saved skill |
+| `skill_create` | `name`, `description`, `content` | Create a skill |
+| `skill_update` | `name`, `old_text`, `new_text` | Edit a skill |
+| `skill_rewrite` | `name`, `description`, `content` | Full rewrite |
+| `skill_delete` | `name` | Delete a skill |
+| `skill_learning_stats` | — | Auto-learning status and detected patterns |
+
+### Sessions
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `session_search` | `query` | Search past conversation sessions |
+| `session_list` | — | List recent sessions |
+
+### System (new)
+| Tool | Key params | Description |
+|------|-----------|-------------|
+| `system_profile` | — | Full hardware analysis + model recommendation |
+
+---
+
+## Configuration Reference (`.env`)
+
+```bash
+# ── Paths ──────────────────────────────────────────────────────────────────
+OBSIDIAN_VAULT_PATH=/home/yourname/Documents/ObsidianVault
+
+# ── LLM ────────────────────────────────────────────────────────────────────
+LLM_BACKEND=ollama                      # ollama | llamacpp
+LLM_MODEL=qwen2.5:7b                    # Ollama model tag
+LLM_MODEL_PATH=models/qwen2.5-7b.gguf  # llama.cpp path (if backend=llamacpp)
+LLM_N_GPU_LAYERS=0                      # 0=CPU only, -1=all GPU, N=partial
+LLM_CONTEXT_LENGTH=4096
+LLM_THREADS=6
+LLM_TEMPERATURE=0.7
+LLM_OLLAMA_HOST=http://localhost:11434
+
+# ── STT ────────────────────────────────────────────────────────────────────
+STT_MODEL=small                         # tiny|base|small|medium|large-v3
+STT_DEVICE=cpu                          # cpu|cuda
+STT_LANGUAGE=                           # blank = auto-detect (supports Urdu)
+
+# ── TTS ────────────────────────────────────────────────────────────────────
+TTS_VOICE=af_heart                      # Kokoro voice ID
+
+# ── Wake Word ──────────────────────────────────────────────────────────────
+WAKE_WORD_PHRASE=Hey Zohaib
+
+# ── Web Search ─────────────────────────────────────────────────────────────
+WEB_SEARCH_ENABLED=false                # off by default
+
+# ── RAG ───────────────────────────────────────────────────────────
+RAG_DOCUMENTS_DIR=/home/yourname/Documents
+
+# ── MCP ───────────────────────────────────────────────────────────
+MCP_ENABLED=false
+MCP_SERVERS=[]
+
+# ── Projects ──────────────────────────────────────────────────────
+PROJECT_AUTO_DETECT=true
+
+# ── Skill Learning ────────────────────────────────────────────────
+SKILL_LEARNING_ENABLED=true
+SKILL_PATTERN_THRESHOLD=3
+
+# ── Multi-Agent ──────────────────────────────────────────────────
+MULTI_AGENT_ENABLED=false
 ```
 
 ---
@@ -113,467 +495,120 @@ python -m app.main --mode query --query "List my workspace files"
 ## Directory Structure
 
 ```
-assistant/
+hafiz/
 ├── app/
-│   ├── main.py                  # Entry point and mode selector
-│   ├── config.py                # All settings (overridable via .env)
-│   ├── router.py                # FastAPI endpoints
-│   ├── pipeline.py              # Core listen → think → speak orchestrator
-│   ├── planner.py               # Task planner — step-by-step plan for complex tasks
+│   ├── main.py                 # Entry point (server/voice/terminal/query modes)
+│   ├── config.py               # All settings, pydantic-settings
+│   ├── router.py               # FastAPI app and all endpoints
+│   ├── planner.py              # Task planner (LLM call → structured plan)
+│   ├── intent.py               # Intent classifier (no LLM)
+│   ├── system_profiler.py      # Hardware detection + model recommender
+│   │
+│   ├── agents/
+│   │   ├── researcher.py       # Multi-source research agent
+│   │   └── orchestrator.py     # Multi-agent coordinator
+│   │
 │   ├── audio/
-│   │   ├── microphone.py
-│   │   ├── vad.py               # Silero VAD + speech collector
-│   │   ├── wake_word.py         # OpenWakeWord detector
-│   │   ├── stt.py               # Faster-Whisper transcription
-│   │   └── tts.py               # Kokoro TTS + audio player (speed param, no global mutation)
+│   │   ├── stt.py              # faster-whisper STT
+│   │   ├── tts.py              # Kokoro TTS (streamed)
+│   │   ├── vad.py              # Silero VAD + speech collector
+│   │   ├── microphone.py       # PyAudio input stream
+│   │   └── wake_word.py        # openWakeWord detector
+│   │
 │   ├── llm/
-│   │   └── engine.py            # llama.cpp or Ollama streaming wrapper (async-safe lock)
+│   │   └── engine.py           # Ollama + llama-cpp-python backend
+│   │
 │   ├── memory/
-│   │   ├── manager.py           # Short-term buffer + SQLite long-term (query-aware recall)
-│   │   ├── hot_memory.py        # MEMORY.md + USER.md (always-on curated facts)
-│   │   ├── curator.py           # Memory Curator Agent (store / reject / consolidate)
-│   │   ├── skills.py            # Self-improving skills (procedural memory)
-│   │   └── session_store.py     # Full conversation archive + FTS5 search
+│   │   ├── manager.py          # Short-term + long-term memory coordinator
+│   │   ├── hot_memory.py       # In-context structured memory
+│   │   ├── scoring.py          # Importance/recency/confidence/frequency
+│   │   ├── projects.py         # Project registry + context loading
+│   │   ├── skill_learner.py    # Pattern detection + skill proposals
+│   │   ├── skills.py           # Named skill CRUD
+│   │   ├── curator.py          # Memory quality gating (LLM-based)
+│   │   └── session_store.py    # SQLite session archive
+│   │
 │   ├── tools/
-│   │   ├── router.py            # Tool dispatcher and validator
-│   │   ├── filesystem.py        # Sandboxed file operations
-│   │   ├── web_search.py        # DuckDuckGo search (opt-in)
-│   │   ├── obsidian.py          # Vault integration: notes, search, graph awareness
-│   │   └── knowledge_graph.py   # Entity/relation graph, pathfinding, clustering
-│   ├── prompts/
-│   │   └── templates.py         # System prompt (hot memory + skills + plan injected)
-│   └── utils/
-│       ├── logging.py
-│       └── timing.py
-├── tests/
-│   ├── conftest.py              # Shared fixtures, mock LLM helpers
-│   ├── test_01_tool_selection.py  # 30 tests — tool routing, JSON parsing
-│   ├── test_02_memory.py          # 20 tests — hot memory, curator, SQLite FTS5
-│   ├── test_03_obsidian.py        # 13 tests — note creation, search, related, projects
-│   ├── test_04_planning.py        # 21 tests — complexity classifier, planner, sequences
-│   ├── test_05_voice_speech.py    # 23 tests — speech fields, interrupts, confidence
-│   ├── test_06_session_kg.py      # 16 tests — session archive, knowledge graph
-│   └── test_07_skills.py          # 15 tests — skill CRUD, index, prompt injection
+│   │   ├── router.py           # Tool dispatch + validation
+│   │   ├── filesystem.py       # File I/O (sandboxed to workspace)
+│   │   ├── web_search.py       # DuckDuckGo search
+│   │   ├── obsidian.py         # Full Obsidian vault integration + vectors
+│   │   ├── knowledge_graph.py  # SQLite KG
+│   │   ├── mcp_client.py       # MCP HTTP/stdio client
+│   │   └── rag/
+│   │       ├── ingestor.py     # PDF/DOCX/EPUB chunking + embedding
+│   │       └── search.py       # BM25 + semantic + RRF hybrid retrieval
+│   │
+│   └── prompts/
+│       └── templates.py        # System prompt builder
+│
+├── ui/                         # React + Tauri desktop UI
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── api.ts              # Typed FastAPI client
+│   │   ├── styles.css
+│   │   ├── stores/useStore.ts  # Zustand global state
+│   │   └── components/
+│   │       ├── ChatPanel.tsx
+│   │       ├── MemoryPanel.tsx
+│   │       ├── GraphPanel.tsx
+│   │       ├── DocsPanel.tsx
+│   │       ├── SystemPanel.tsx
+│   │       ├── SecondaryPanels.tsx  # Skills, Projects, Settings
+│   │       └── Sidebar.tsx
+│   └── src-tauri/              # Tauri shell (Rust)
+│
+├── models/                     # GGUF model files (if using llama.cpp)
 ├── data/
-│   ├── memory.db                # SQLite long-term memory (cold archive)
-│   ├── sessions.db              # SQLite session archive (full conversation FTS5)
-│   ├── knowledge_graph.db       # Entity and relation store
-│   ├── obsidian_vectors.db      # Semantic search index for vault
-│   ├── MEMORY.md                # Agent hot memory (env facts, conventions, lessons)
-│   ├── USER.md                  # User profile (preferences, communication style)
-│   ├── skills/                  # Self-improving SKILL.md files
-│   │   └── <skill-name>/
-│   │       └── SKILL.md
-│   ├── conversations/
-│   ├── cache/
-│   └── logs/
-├── models/                      # Place .gguf model files here
-├── AssistantWorkspace/          # Sandboxed file workspace
-├── pytest.ini
+│   ├── memory.db               # SQLite: hot memory + scored memories + skill candidates
+│   ├── obsidian_vectors.db     # SQLite: note embeddings + doc embeddings
+│   ├── knowledge_graph.db      # SQLite: KG nodes + edges
+│   ├── projects.db             # SQLite: project registry
+│   └── conversations/          # Session archives (JSON)
+├── tests/
+│   ├── test_08_intent_research.py      # 58 tests
+│   ├── test_09_rag_kg_mcp.py           # 64 tests
+│   ├── test_10_scoring_projects_skills.py # 83 tests
+│   └── test_11_multiagent_profiler.py  # 49 tests
+├── AssistantWorkspace/         # Sandboxed file I/O directory
 ├── requirements.txt
-├── requirements-test.txt
-├── setup.sh
-└── README.md
+└── .env
 ```
 
 ---
 
 ## Running Tests
 
-### Install test dependencies
-
 ```bash
-pip install -r requirements-test.txt
-```
-
-### Run all tests (no models, no hardware needed)
-
-```bash
-pytest
-```
-
-### Run a specific suite
-
-```bash
-pytest tests/test_01_tool_selection.py   # Tool routing
-pytest tests/test_02_memory.py           # Memory precision
-pytest tests/test_03_obsidian.py         # Obsidian coherence
-pytest tests/test_04_planning.py         # Planner
-pytest tests/test_05_voice_speech.py     # Speech behaviour
-pytest tests/test_06_session_kg.py       # Session store + Knowledge Graph
-pytest tests/test_07_skills.py           # Skills system
-```
-
-### Verbose output with timing
-
-```bash
-pytest -v --tb=short
-```
-
-### Run only fast tests (exclude slow/integration)
-
-```bash
-pytest -m "not slow and not integration"
+pytest tests/ -v
+# 254 tests, all offline — no LLM, no network, no Obsidian vault required
 ```
 
 ---
 
-## Test Coverage
+## Model Recommendations
 
-| Suite | Tests | What it measures |
-|---|---|---|
-| 01 Tool Selection | 30 | Correct tool chosen (or no tool); JSON robustness; validation |
-| 02 Memory | 20 | Store vs reject precision; hot memory CRUD; curator decisions; SQLite FTS5 |
-| 03 Obsidian | 13 | Note creation, reading, keyword search, related notes, project coherence |
-| 04 Planning | 21 | Complexity classifier; plan step order; required tools; pipeline integration |
-| 05 Voice/Speech | 23 | Pace/pause/tone per input type; interruptibility flag; confidence field |
-| 06 Session + KG | 16 | Session archive FTS5; pathfinding; clustering; orphan detection; temporal |
-| 07 Skills | 15 | Create/load/update/rewrite/delete; index in prompt; slug sanitization |
-| **Total** | **138** | |
+| RAM | Best model | Quant | Backend |
+|-----|-----------|-------|---------|
+| 4 GB | Qwen2.5-1.5B | Q4_K_M | Ollama |
+| 8 GB | Qwen2.5-7B or Llama-3.1-8B | Q4_K_M | Ollama |
+| 16 GB | Qwen2.5-14B or DeepSeek-R1-14B | Q4_K_M | Ollama |
+| 32 GB+ | Qwen2.5-32B | Q4_K_M | Ollama |
+| Apple Silicon | Any of the above | — | Ollama (Metal) |
 
-All 138 tests run offline with no models, no microphone, no Obsidian vault required. LLM calls are mocked — tests inject pre-built JSON responses via `make_llm_response()`.
+For GPU offload, run the system profiler — it calculates the correct `LLM_N_GPU_LAYERS` for your VRAM automatically.
 
 ---
 
-## Configuration
+## Supported Languages
 
-Copy `.env.example` to `.env` and adjust as needed.
-
-```bash
-# LLM
-LLM_MODEL_PATH=models/qwen2.5-3b-instruct-q4_k_m.gguf
-LLM_THREADS=6
-LLM_CONTEXT_LENGTH=4096
-LLM_MAX_TOKENS=512
-LLM_TEMPERATURE=0.7
-
-# STT
-STT_MODEL=small               # tiny / base / small / medium
-STT_LANGUAGE=                 # blank = auto-detect (supports Urdu + English)
-
-# TTS
-TTS_VOICE=af_heart
-TTS_SPEED=1.0
-
-# Wake word
-WAKE_WORD_PHRASE=Hey Zohaib
-WAKE_WORD_THRESHOLD=0.5
-
-# Memory
-MEMORY_SHORT_TERM_LIMIT=20
-
-# Obsidian
-OBSIDIAN_VAULT_PATH=/home/zohaib/Documents/notes
-
-# Web search (disabled by default)
-WEB_SEARCH_ENABLED=false
-```
+STT (Whisper) supports 99 languages including **English and Urdu** simultaneously with auto-detection. Set `STT_LANGUAGE=ur` to force Urdu, or leave blank for automatic.
 
 ---
 
-## LLM Response Format
-
-Every LLM response is structured JSON. No prose outside JSON is ever output.
-
-```json
-{
-  "tool": null,
-  "tool_params": null,
-  "response": "What to say to the user.",
-  "confidence": 0.92,
-  "interruptible": true,
-  "speech": {
-    "pace": 1.0,
-    "clause_pause_ms": 120,
-    "tone": "neutral"
-  }
-}
-```
-
-The `thought` field has been removed to prevent chain-of-thought and system prompt leakage.
-
-### Speech field reference
-
-| Field | Values | Notes |
-|---|---|---|
-| `pace` | 0.75–1.15 | 0.75 = reading log files; 1.15 = short confirmations |
-| `clause_pause_ms` | 50–350 | 50 = "Done."; 350 = reading a list item by item |
-| `tone` | neutral / informative / warm / focused / urgent | Guides TTS voice energy |
-| `confidence` | 0.0–1.0 | Below 0.6 → prefer tool use or acknowledge uncertainty |
-| `interruptible` | true / false | false = critical confirmations (delete, save, alarms) |
-
----
-
-## Memory System
-
-### Hot memory (always-on)
-
-Two character-limited files injected into every prompt:
-
-- `data/MEMORY.md` — agent memory: environment facts, project conventions, tool quirks, lessons learned (2,200 char limit)
-- `data/USER.md` — user profile: name, preferences, communication style, things to avoid (1,375 char limit)
-
-The Curator Agent evaluates every proposed memory before writing. It stores durable facts, rejects ephemeral ones, and consolidates updates.
-
-```
-You: I prefer Urdu for casual chat.
-Curator: → store [user] "Prefers Urdu for casual chat."
-
-You: I had chicken for lunch.
-Curator: → reject (ephemeral meal detail)
-
-You: I watched a movie yesterday.
-Curator: → reject (one-off activity)
-```
-
-### Cold memory (query-aware recall)
-
-SQLite FTS5 full-text search. Recalled by relevance to the current query, not just by category.
-
-### Session archive
-
-Every conversation turn is logged to `data/sessions.db`. Searchable by voice:
-
-```
-You: What did I say about Snowflake last week?
-→ session_search("Snowflake")
-```
-
----
-
-## Skills (Procedural Memory)
-
-The assistant creates reusable workflow procedures from experience. After completing a multi-tool task, it may save the approach as a skill:
-
-```
-You: Find the Snowflake release notes, create a note, and link it to Data Engineering.
-[3 tool calls later — task complete]
-Assistant: [saves skill "research-and-document" to data/skills/]
-
-Next time:
-You: Research the dbt release and document it.
-Assistant: [loads skill "research-and-document"] → follows the saved procedure
-```
-
-Skills are plain `SKILL.md` files you can read and edit directly.
-
----
-
-## Obsidian Integration
-
-| Voice command | Tool |
-|---|---|
-| "Create a note about RAG" | `obsidian_create_note` |
-| "Remember this idea" | `obsidian_capture_idea` |
-| "Log this to my daily note" | `obsidian_append_daily` |
-| "What did I write about attention?" | `obsidian_search` (semantic) |
-| "Search my notes for transformer" | `obsidian_keyword_search` |
-| "What's related to [[Transformers]]?" | `obsidian_get_related` |
-| "Continue working on project X" | `obsidian_get_project` |
-| "Good morning" | `obsidian_morning_briefing` |
-| "Read note titled X" | `obsidian_read_note` |
-| "Reindex my vault" | `obsidian_reindex` |
-
-Every note created is automatically indexed into the Knowledge Graph via its `[[wikilinks]]`.
-
----
-
-## Knowledge Graph
-
-Persistent SQLite store of concepts (nodes) and typed relations (edges).
-
-```sql
-kg_nodes  (id, name, note_title, created_at)
-kg_edges  (id, source, target, relation, weight, created_at)
-```
-
-| Voice command | Tool |
-|---|---|
-| "How does attention connect to memory?" | `kg_path` |
-| "What's related to transformers in my graph?" | `kg_neighbors` |
-| "Show me my knowledge graph stats" | `kg_summary` |
-| "What are my orphan / isolated concepts?" | `kg_orphans` |
-| "What topic clusters do I have?" | `kg_clusters` |
-| "How did my thinking on X evolve?" | `kg_timeline` |
-
----
-
-## Planner
-
-For complex multi-step requests, a planner LLM call runs before the main assistant:
-
-```
-You: Find the latest Snowflake release, create a note, link it to Data Engineering, add to daily.
-
-Planner produces:
-  Goal: Research and document Snowflake release.
-  Step 1: Search web for latest Snowflake release notes
-  Step 2: Summarize findings
-  Step 3: Create Obsidian note titled "Snowflake <version>"
-  Step 4: Add knowledge graph links to Data Engineering
-  Step 5: Append summary to daily note
-  Tools needed: web_search, obsidian_create_note, kg_add, obsidian_append_daily
-
-Main assistant executes steps in order.
-```
-
-Simple inputs (greetings, math, short questions) skip the planner entirely for latency.
-
----
-
-## Tool System
-
-The LLM never executes actions directly. It outputs structured JSON; the tool router validates and dispatches.
-
-### Full tool registry
-
-| Tool | Parameters |
-|---|---|
-| `read_file` | `path` |
-| `write_file` | `path`, `content` |
-| `append_file` | `path`, `content` |
-| `list_directory` | `path` (opt) |
-| `delete_file` | `path` |
-| `web_search` | `query` |
-| `save_memory` | `category`, `content` |
-| `recall_memory` | `query` |
-| `memory_write` | `target`, `content` → routed through Curator |
-| `memory_remove` | `target`, `substring` |
-| `memory_replace` | `target`, `old_substring`, `new_content` |
-| `memory_read` | `target` |
-| `obsidian_create_note` | `title`, `content`, `folder`, `tags`, `related` |
-| `obsidian_append_daily` | `content`, `section` |
-| `obsidian_capture_idea` | `raw_thought` |
-| `obsidian_search` | `query` |
-| `obsidian_keyword_search` | `query` |
-| `obsidian_get_related` | `note_title` |
-| `obsidian_get_project` | `project_name` |
-| `obsidian_morning_briefing` | — |
-| `obsidian_reindex` | — |
-| `obsidian_read_note` | `title` |
-| `obsidian_list_vault` | `folder` (opt) |
-| `kg_summary` | — |
-| `kg_path` | `source`, `target` |
-| `kg_neighbors` | `node`, `depth` |
-| `kg_orphans` | — |
-| `kg_clusters` | — |
-| `kg_timeline` | `node`, `after_date`, `before_date` |
-| `kg_add` | `title`, `entities`, `relations` |
-| `skill_load` | `name` |
-| `skill_create` | `name`, `description`, `content`, `category` |
-| `skill_update` | `name`, `old_text`, `new_text` |
-| `skill_rewrite` | `name`, `description`, `content` |
-| `skill_delete` | `name` |
-| `session_search` | `query` |
-| `session_list` | — |
-
-Tool loop: up to 4 chained calls per turn. Each call has a 30-second timeout.
-
----
-
-## Sandbox Security
-
-File operations restricted to `AssistantWorkspace/`. Path traversal blocked at the resolver. Allowed extensions: `.txt .md .json .py .js .csv .yaml .toml .pdf`.
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/health` | System status |
-| POST | `/chat` | Text chat |
-| POST | `/chat/stream` | Streaming SSE |
-| POST | `/tool` | Direct tool invocation |
-| GET | `/memory` | Query memories |
-| POST | `/memory` | Save a memory |
-| DELETE | `/memory/{id}` | Delete a memory |
-| WS | `/ws/audio` | Real-time audio |
-| POST | `/settings/web-search` | Toggle web search |
-
----
-
-## Using Ollama Instead of llama.cpp
-
-Change in `app/config.py`:
-```python
-LLM_BACKEND: str = "ollama"
-LLM_MODEL: str = "qwen2.5:3b"
-LLM_OLLAMA_HOST: str = "http://localhost:11434"
-```
-
-Swap models with zero code changes:
-```bash
-# In .env
-LLM_MODEL=qwen2.5:7b        # better reasoning, fits in 16 GB RAM
-LLM_MODEL=qwen2.5:1.5b      # faster, smaller
-LLM_MODEL=aya:8b             # strong Urdu + English
-LLM_MODEL=qwen2.5-coder:7b  # code-heavy sessions
-```
-
----
-
-## Performance Targets
-
-| Stage | Target |
-|---|---|
-| Wake word detection | < 200 ms |
-| STT transcription | < 1 s |
-| LLM first token | < 1.5 s |
-| TTS first audio | < 500 ms |
-| Full response | < 4 s |
-
----
-
-## Bug Fixes Applied
-
-**Async lock in LLM engine** — `run_in_executor` was not awaited inside the async lock. Fixed with `await loop.run_in_executor(...)`.
-
-**TTS global settings mutation** — `speak()` mutated `settings.tts_speed` directly (not thread-safe). TTS now accepts a `speed` parameter.
-
-**`asyncio.get_event_loop()` inside executor threads** — deprecated in Python 3.10+. All `obsidian.py` functions now use `asyncio.get_running_loop()`.
-
-**Wake word state machine** — `awaiting_speech` was set to `True` before the wake word check, causing collection to start on the triggering chunk. Now only set on confirmed detection.
-
-**Conversation history dropped from prompt** — `build_system_prompt()` accepted `conversation_history` but never used it. Now correctly injected.
-
-**Memory recall not query-aware** — `get_context()` ignored the user query when recalling memories. Now passes `user_text` to `format_for_context()`.
-
-**Tool call timeout** — no timeout guard on tool dispatch. Now wrapped in `asyncio.wait_for()` with 30-second limit.
-
-**Chain-of-thought leakage** — `thought` field in JSON output exposed internal reasoning and system prompt fragments. Field removed entirely.
-
-**Memory pollution** — assistant wrote to memory freely, accumulating noise over time. All `memory_write` calls now route through the Curator Agent (store / reject / consolidate).
-
-**No planner for complex tasks** — multi-step requests had no execution plan, causing skipped steps. Planner layer now injects an ordered plan for complex inputs.
-
----
-
-## Troubleshooting
-
-**Model not found** — place `.gguf` file in `models/`, or run `setup.sh`.
-
-**No audio input** — run `arecord -l`. Set `AUDIO_INPUT_DEVICE=<index>` in `.env`.
-
-**High latency** — reduce `LLM_THREADS`. Try `STT_MODEL=tiny`.
-
-**Wake word not triggering** — lower `WAKE_WORD_THRESHOLD` to `0.3`.
-
-**Semantic search returns nothing** — run `obsidian_reindex` once to index existing notes.
-
-**Tests failing with import errors** — ensure you are in the project root with `venv` active. Run `pip install -r requirements-test.txt`.
-
----
-
-## Roadmap
-
-- Decision model layer (intent classifier before planner)
-- Labeled evaluation dataset (100–200 interactions with correct tool / memory / speech labels)
-- GUI (web or desktop)
-- RAG over local documents (PDF, EPUB)
-- Calendar integration
-- Vision model for image understanding
-- Custom "Hey Zohaib" wake word model (.onnx training)
-- Graph-expanded retrieval (semantic search + graph hop combined)
-- Periodic cluster reports in morning briefing
-- Mobile companion app
+## Privacy
+
+- All processing is local. No data is sent anywhere.
+- Web search (DuckDuckGo) is **off by default** and must be explicitly enabled.
+- MCP server connections are opt-in and require explicit configuration.
+- The system profiler runs only on your machine — hardware data is never transmitted.

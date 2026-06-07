@@ -1,5 +1,5 @@
 """
-Tests for Phase 6 (Memory Scoring), Phase 7 (Project Continuity), Phase 8 (Skill Auto-Learning).
+Tests for Memory Scoring, Project Continuity, Skill Auto-Learning.
 
 Run: pytest tests/test_10_scoring_projects_skills.py -v
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 6 — Memory Scoring
+# Memory Scoring
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestImportanceEstimator:
@@ -231,7 +231,7 @@ class TestMemoryScoreDB:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 7 — Project Continuity
+# Project Continuity
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestSlugify:
@@ -249,7 +249,7 @@ class TestSlugify:
 
     def test_numbers_preserved(self):
         from app.memory.projects import _slugify
-        assert "3" in _slugify("Phase 3 Implementation")
+        assert "3" in _slugify("Implementation")
 
 
 class TestProjectNameExtraction:
@@ -371,7 +371,7 @@ class TestProjectContext:
             vault_folder="AI Assistant",
             loaded_at="09:30",
         )
-        ctx.open_tasks    = ["Implement Phase 8", "Write tests"]
+        ctx.open_tasks    = ["Implement Phase", "Write tests"]
         ctx.notes         = [{"title": "Architecture", "snippet": "Pipeline design doc"}]
         ctx.memories      = ["User prefers Python", "Project started March 2024"]
         ctx.graph_entities = ["LLM", "RAG", "Obsidian", "Pipeline"]
@@ -385,7 +385,7 @@ class TestProjectContext:
     def test_to_context_string_contains_tasks(self):
         ctx = self._make_ctx()
         s = ctx.to_context_string()
-        assert "Implement Phase 8" in s
+        assert "Implement Phase" in s
 
     def test_to_context_string_contains_notes(self):
         ctx = self._make_ctx()
@@ -414,7 +414,7 @@ class TestProjectContext:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 8 — Skill Auto-Learning
+# Skill Auto-Learning
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestSequenceNormalisation:

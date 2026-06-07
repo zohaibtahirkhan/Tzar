@@ -1,49 +1,28 @@
 /**
- * src/stores/useStore.ts
- *
- * Single Zustand store for the entire app.
- * Panels: chat, memory, knowledge-graph, skills, projects, settings.
+ * src/stores/useStore.ts — global Zustand store
  */
-
 import { create } from "zustand";
-import type { Memory, HealthResponse } from "../api";
+import type { Memory, HealthResponse, RagDoc } from "../api";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type Panel = "chat" | "memory" | "graph" | "skills" | "projects" | "settings";
+export type Panel = "chat" | "memory" | "graph" | "skills" | "projects" | "docs" | "system" | "settings";
 
 export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   streaming?: boolean;
-  toolResults?: { tool: string; result: string }[];
+  toolResults?: { tool: string; result: string; status: string }[];
   ts: number;
 }
 
-export interface Project {
-  name: string;
-  status: "active" | "paused" | "archived";
-  description: string;
-  last_opened: string | null;
-}
+export interface KGNode { id: string; label: string; group: string; }
+export interface KGEdge { source: string; target: string; relation: string; }
 
-export interface KGNode {
-  id: string;
-  label: string;
-  group: string;
-}
-
-export interface KGEdge {
-  source: string;
-  target: string;
-  relation: string;
-}
-
-// ─── Store ────────────────────────────────────────────────────────────────────
+let _msgId = 0;
+export const nextId = () => `msg-${++_msgId}-${Date.now()}`;
 
 interface State {
-  // Navigation
+  // Nav
   activePanel: Panel;
   setPanel: (p: Panel) => void;
 
@@ -58,19 +37,17 @@ interface State {
   appendToken: (id: string, token: string) => void;
   finaliseStream: (id: string) => void;
   clearChat: () => void;
-
-  // Input
   inputText: string;
   setInputText: (t: string) => void;
 
-  // Memories
+  // Memory
   memories: Memory[];
   memoriesLoading: boolean;
   setMemories: (m: Memory[]) => void;
   setMemoriesLoading: (b: boolean) => void;
   removeMemory: (id: number) => void;
 
-  // Knowledge Graph
+  // KG
   kgNodes: KGNode[];
   kgEdges: KGEdge[];
   kgLoading: boolean;
@@ -78,112 +55,93 @@ interface State {
   setKGLoading: (b: boolean) => void;
 
   // Projects
-  projects: Project[];
   activeProject: string | null;
-  projectsLoading: boolean;
-  setProjects: (p: Project[]) => void;
-  setActiveProject: (name: string | null) => void;
-  setProjectsLoading: (b: boolean) => void;
+  setActiveProject: (n: string | null) => void;
 
   // Skills
   skillStats: string;
   setSkillStats: (s: string) => void;
 
+  // RAG docs
+  ragDocs: RagDoc[];
+  ragDocsLoading: boolean;
+  setRagDocs: (d: RagDoc[]) => void;
+  setRagDocsLoading: (b: boolean) => void;
+
+  // System profile
+  systemProfile: string;
+  systemProfileLoading: boolean;
+  setSystemProfile: (s: string) => void;
+  setSystemProfileLoading: (b: boolean) => void;
+
   // Settings
   webSearchEnabled: boolean;
   setWebSearchEnabled: (b: boolean) => void;
+  multiAgentEnabled: boolean;
+  setMultiAgentEnabled: (b: boolean) => void;
 
   // Sidebar
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
 }
 
-let _msgId = 0;
-export const nextId = () => `msg-${++_msgId}-${Date.now()}`;
-
 export const useStore = create<State>((set) => ({
-  // Navigation
   activePanel: "chat",
   setPanel: (p) => set({ activePanel: p }),
 
-  // Health
   health: null,
   setHealth: (h) => set({ health: h }),
 
-  // Chat
-  messages: [
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Hafiz is ready. How can I help?",
-      ts: Date.now(),
-    },
-  ],
+  messages: [{ id: "welcome", role: "assistant", content: "Hafiz is ready.", ts: Date.now() }],
   isStreaming: false,
-  addMessage: (m) =>
-    set((s) => ({ messages: [...s.messages, m] })),
+  addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   appendToken: (id, token) =>
     set((s) => ({
       isStreaming: true,
-      messages: s.messages.map((m) =>
-        m.id === id ? { ...m, content: m.content + token } : m
-      ),
+      messages: s.messages.map((m) => m.id === id ? { ...m, content: m.content + token } : m),
     })),
   finaliseStream: (id) =>
     set((s) => ({
       isStreaming: false,
-      messages: s.messages.map((m) =>
-        m.id === id ? { ...m, streaming: false } : m
-      ),
+      messages: s.messages.map((m) => m.id === id ? { ...m, streaming: false } : m),
     })),
-  clearChat: () =>
-    set({
-      messages: [
-        {
-          id: "welcome",
-          role: "assistant",
-          content: "Memory cleared. Fresh start.",
-          ts: Date.now(),
-        },
-      ],
-    }),
-
-  // Input
+  clearChat: () => set({ messages: [{ id: "welcome-2", role: "assistant", content: "Memory cleared.", ts: Date.now() }] }),
   inputText: "",
   setInputText: (t) => set({ inputText: t }),
 
-  // Memories
   memories: [],
   memoriesLoading: false,
   setMemories: (m) => set({ memories: m }),
   setMemoriesLoading: (b) => set({ memoriesLoading: b }),
-  removeMemory: (id) =>
-    set((s) => ({ memories: s.memories.filter((m) => m.id !== id) })),
+  removeMemory: (id) => set((s) => ({ memories: s.memories.filter((m) => m.id !== id) })),
 
-  // KG
   kgNodes: [],
   kgEdges: [],
   kgLoading: false,
   setKG: (nodes, edges) => set({ kgNodes: nodes, kgEdges: edges }),
   setKGLoading: (b) => set({ kgLoading: b }),
 
-  // Projects
-  projects: [],
   activeProject: null,
-  projectsLoading: false,
-  setProjects: (p) => set({ projects: p }),
-  setActiveProject: (name) => set({ activeProject: name }),
-  setProjectsLoading: (b) => set({ projectsLoading: b }),
+  setActiveProject: (n) => set({ activeProject: n }),
 
-  // Skills
   skillStats: "",
   setSkillStats: (s) => set({ skillStats: s }),
 
-  // Settings
+  ragDocs: [],
+  ragDocsLoading: false,
+  setRagDocs: (d) => set({ ragDocs: d }),
+  setRagDocsLoading: (b) => set({ ragDocsLoading: b }),
+
+  systemProfile: "",
+  systemProfileLoading: false,
+  setSystemProfile: (s) => set({ systemProfile: s }),
+  setSystemProfileLoading: (b) => set({ systemProfileLoading: b }),
+
   webSearchEnabled: false,
   setWebSearchEnabled: (b) => set({ webSearchEnabled: b }),
+  multiAgentEnabled: false,
+  setMultiAgentEnabled: (b) => set({ multiAgentEnabled: b }),
 
-  // Sidebar
   sidebarCollapsed: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 }));

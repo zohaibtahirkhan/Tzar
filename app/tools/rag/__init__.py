@@ -1,4 +1,4 @@
-"""app/tools/rag — Local Document RAG (Phase 3)."""
+"""app/tools/rag — Local Document RAG"""
 from app.tools.rag.ingestor import (
     ingest_document,
     ingest_directory,

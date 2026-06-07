@@ -1,8 +1,5 @@
 /**
- * src/api.ts
- *
- * Typed client for the Hafiz FastAPI backend (http://127.0.0.1:8000).
- * Covers every endpoint in router.py plus SSE streaming.
+ * src/api.ts — complete typed client for the Hafiz FastAPI backend.
  */
 
 const BASE = "http://127.0.0.1:8000";
@@ -44,12 +41,16 @@ export interface MemoryScoreResponse {
   memories: Memory[];
 }
 
-// ─── Core fetch helper ────────────────────────────────────────────────────────
+export interface RagDoc {
+  title: string;
+  source_path: string;
+  chunks: number;
+  last_indexed: string;
+}
 
-async function apiFetch<T>(
-  path: string,
-  options: RequestInit = {}
-): Promise<T> {
+// ─── Core fetch ───────────────────────────────────────────────────────────────
+
+async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...options.headers },
     ...options,
@@ -73,11 +74,6 @@ export const sendChat = (message: string) =>
     body: JSON.stringify({ message }),
   });
 
-/**
- * SSE streaming chat. Calls onToken for each streamed token,
- * onDone when stream is complete, onError on failure.
- * Returns an AbortController so the caller can cancel.
- */
 export function streamChat(
   message: string,
   onToken: (token: string) => void,
@@ -95,10 +91,7 @@ export function streamChat(
         signal: ctrl.signal,
       });
 
-      if (!res.ok || !res.body) {
-        onError(`Stream error: ${res.status}`);
-        return;
-      }
+      if (!res.ok || !res.body) { onError(`Stream error: ${res.status}`); return; }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -107,32 +100,23 @@ export function streamChat(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
-
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6).trim();
-          if (data === "[DONE]") {
-            onDone();
-            return;
-          }
+          if (data === "[DONE]") { onDone(); return; }
           try {
             const parsed = JSON.parse(data);
             if (parsed.token) onToken(parsed.token);
             if (parsed.error) onError(parsed.error);
-          } catch {
-            // ignore malformed lines
-          }
+          } catch { /* ignore */ }
         }
       }
       onDone();
     } catch (err: unknown) {
-      if ((err as Error).name !== "AbortError") {
-        onError(String(err));
-      }
+      if ((err as Error).name !== "AbortError") onError(String(err));
     }
   })();
 
@@ -171,14 +155,21 @@ export const setWebSearch = (enabled: boolean) =>
     body: JSON.stringify({ enabled }),
   });
 
-// ─── Convenience tool wrappers ────────────────────────────────────────────────
+// ─── Named tool wrappers ──────────────────────────────────────────────────────
 
-export const getKGSummary    = () => invokeTool("kg_summary");
-export const getKGNeighbors  = (node: string, depth = 1) =>
-  invokeTool("kg_neighbors", { node, depth });
-
-export const getSkillStats   = () => invokeTool("skill_learning_stats");
-export const getMemoryScores = () => invokeTool("memory_scores");
-export const getProjectList  = () => invokeTool("project_list");
-export const switchProject   = (name: string) => invokeTool("project_switch", { name });
-export const getMCPStatus    = () => invokeTool("mcp_status");
+export const getKGSummary      = () => invokeTool("kg_summary");
+export const getKGNeighbors    = (node: string, depth = 1) => invokeTool("kg_neighbors", { node, depth });
+export const getSkillStats     = () => invokeTool("skill_learning_stats");
+export const getMemoryScores   = () => invokeTool("memory_scores");
+export const getProjectList    = () => invokeTool("project_list");
+export const switchProject     = (name: string) => invokeTool("project_switch", { name });
+export const getMCPStatus      = () => invokeTool("mcp_status");
+export const getSystemProfile  = () => invokeTool("system_profile");
+export const listDocuments     = () => invokeTool("list_documents");
+export const ingestDocument    = (path: string) => invokeTool("ingest_document", { path });
+export const ingestDirectory   = (directory: string) => invokeTool("ingest_directory", { directory });
+export const removeDocument    = (path: string) => invokeTool("remove_document", { path });
+export const docSearch         = (query: string) => invokeTool("doc_search", { query });
+export const unifiedSearch     = (query: string) => invokeTool("unified_search", { query });
+export const pruneMemories     = () => invokeTool("memory_prune");
+export const getProjectStatus  = () => invokeTool("project_status");

@@ -1,7 +1,7 @@
 """
 app/tools/knowledge_graph.py
 
-Knowledge Graph — Phase 4.
+Knowledge Graph
 
 SQLite-backed directed property graph. Every node is an entity
 (concept, person, project, tool). Every edge is a typed relation.
@@ -585,7 +585,7 @@ async def kg_graph_summary() -> str:
 
 async def kg_semantic_expand(query: str, top_k: int = 5) -> str:
     """
-    Semantic graph expansion — Phase 4 key feature.
+    Semantic graph expansion.
 
     1. Find semantically similar notes via embedding search
     2. For each match, fetch its graph neighbours

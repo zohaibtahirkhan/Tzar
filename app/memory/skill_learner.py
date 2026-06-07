@@ -1,7 +1,7 @@
 """
 app/memory/skill_learner.py
 
-Skill Auto-Learning — Phase 8.
+Skill Auto-Learning
 
 Observes every successful multi-step task execution, logs the tool
 sequence to a candidate table, and proposes a skill when the same
