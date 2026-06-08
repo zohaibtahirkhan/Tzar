@@ -44,7 +44,7 @@ from app.tools.obsidian import (
 )
 from app.tools.knowledge_graph import (
     kg_add_from_note,
-    kg_add_from_text,
+    kg_extract_and_index,
     kg_find_path,
     kg_get_neighbors,
     kg_find_orphans,
@@ -115,7 +115,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "obsidian_read_note":         obsidian_read_note,
     "obsidian_list_vault":        obsidian_list_vault,
     "kg_add":           kg_add_from_note,
-    "kg_add_text":      kg_add_from_text,
+    "kg_add_text":      kg_extract_and_index,
     "kg_path":          kg_find_path,
     "kg_neighbors":     kg_get_neighbors,
     "kg_orphans":       kg_find_orphans,

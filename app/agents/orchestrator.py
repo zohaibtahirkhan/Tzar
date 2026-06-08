@@ -268,7 +268,7 @@ class ExecutorAgent(BaseAgent):
             task.status = "running"
             try:
                 if task.tool_name:
-                    result = await router.dispatch(task.tool_name, task.tool_params)
+                    result = await router.dispatch({"tool": task.tool_name, **task.tool_params})
                     task.result = str(result.get("result", ""))
                     ctx.tool_results.append(result)
                 task.status = "done"
@@ -330,7 +330,7 @@ class MemoryCuratorAgent(BaseAgent):
         if MemoryCuratorAgent._run_count % 50 == 0:
             try:
                 from app.memory.scoring import prune_low_score_memories  # noqa: PLC0415
-                result = prune_low_score_memories()
+                result = await prune_low_score_memories()
                 logger.info("MemoryCurator: {}", result)
             except Exception as e:
                 logger.debug("MemoryCurator: prune failed: {}", e)
@@ -389,6 +389,7 @@ async def _synthesise(ctx: AgentContext) -> str:
 
     system = build_system_prompt(
         memory_context=ctx.memory_context,
+        conversation_history="",
         plan_context="",
     )
     synthesis_prompt = (
@@ -465,7 +466,8 @@ class MultiAgentOrchestrator:
     async def _get_memory_context(user_text: str) -> str:
         try:
             from app.memory.manager import memory_manager
-            return await memory_manager.recall_for_context(user_text)
+            memory_ctx, _ = await memory_manager.get_context(user_text)
+            return memory_ctx
         except Exception:
             return ""
 

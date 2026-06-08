@@ -457,8 +457,8 @@ class TestKGOperations:
         assert "MyEntity" in result or "not found" in result.lower()
 
     async def test_add_from_text(self, kg_db):
-        from app.tools.knowledge_graph import kg_add_from_text
-        result = await kg_add_from_text(
+        from app.tools.knowledge_graph import kg_extract_and_index
+        result = await kg_extract_and_index(
             "I learned about RAG and LlamaIndex today.",
             source_note="daily-2024-01-01",
         )

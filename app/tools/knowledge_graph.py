@@ -57,9 +57,14 @@ from app.config import settings
 
 _KG_DB = settings.data_dir / "knowledge_graph.db"
 
+# Public alias — monkeypatched by tests via:
+#   monkeypatch.setattr(kg, "KG_DB_PATH", tmp_path / "kg.db")
+KG_DB_PATH = _KG_DB
 
-def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_KG_DB))
+
+def _get_kg_conn() -> sqlite3.Connection:
+    import app.tools.knowledge_graph as _self
+    conn = sqlite3.connect(str(_self.KG_DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
@@ -93,7 +98,7 @@ def _get_db() -> sqlite3.Connection:
 
 # ─── Low-level helpers ────────────────────────────────────────────────────────
 
-def _upsert_node(conn: sqlite3.Connection, name: str, label: str = "concept") -> int:
+def _add_node(conn: sqlite3.Connection, name: str, label: str = "concept") -> int:
     """Insert or update a node, return its id."""
     conn.execute(
         """INSERT INTO nodes (name, label) VALUES (?, ?)
@@ -202,18 +207,18 @@ async def kg_add_from_note(
     loop = asyncio.get_running_loop()
 
     def _add():
-        conn = _get_db()
+        conn = _get_kg_conn()
         added_nodes = 0
         added_edges = 0
 
         # Add the note itself as a node
-        _upsert_node(conn, title, label="note")
+        _add_node(conn, title, label="note")
         added_nodes += 1
 
         # Add all entities
         for ent in entities:
             if ent and ent != title:
-                _upsert_node(conn, ent, label="concept")
+                _add_node(conn, ent, label="concept")
                 added_nodes += 1
 
         # Add relations
@@ -229,22 +234,24 @@ async def kg_add_from_note(
         return added_nodes, added_edges
 
     added_nodes, added_edges = await loop.run_in_executor(None, _add)
-    return f"KG: +{added_nodes} nodes, +{added_edges} edges (from '{title}')"
+    return f"Updated Knowledge Graph: +{added_nodes} nodes, +{added_edges} edges (from '{title}')"
 
 
-async def kg_add_from_text(text: str, source_note: str = "") -> str:
+async def kg_extract_and_index(text: str, source_note: str = "", note_title: str = "") -> str:
     """
     Auto-extract entities from raw text and add them to the graph.
     Used by the auto-extraction hook in obsidian_create_note.
 
     This is the 'active KG' function — call it whenever a note is saved.
     """
+    # If note_title is provided, prefer it as the source_note
+    effective_source = note_title or source_note or "auto"
     entities = extract_entities(text)
     if not entities:
         return "KG: no entities extracted"
 
     relations = infer_relations(entities, source_note)
-    return await kg_add_from_note(source_note or "auto", entities, relations)
+    return await kg_add_from_note(effective_source, entities, relations)
 
 
 async def kg_get_neighbors(node: str, depth: int = 1) -> str:
@@ -259,7 +266,7 @@ async def kg_get_neighbors(node: str, depth: int = 1) -> str:
     loop = asyncio.get_running_loop()
 
     def _bfs():
-        conn = _get_db()
+        conn = _get_kg_conn()
         start = conn.execute(
             "SELECT id, name, label FROM nodes WHERE name=?", (node,)
         ).fetchone()
@@ -321,20 +328,17 @@ async def kg_get_neighbors(node: str, depth: int = 1) -> str:
     return "\n".join(lines)
 
 
-async def kg_find_path(source: str, target: str) -> str:
+async def kg_find_path(source: str, target: str, max_hops: int = 5) -> str:
     """
     Find the shortest path between two nodes using BFS.
-
-    Args:
-        source: Starting entity name
-        target: Target entity name
+    Returns a tuple: (path_string, error_string).
     """
     loop = asyncio.get_running_loop()
 
     def _bfs_path():
-        conn = _get_db()
-
-        def _get_id(name: str) -> Optional[int]:
+        conn = _get_kg_conn()
+        
+        def _get_id(name: str):
             row = conn.execute("SELECT id FROM nodes WHERE name=?", (name,)).fetchone()
             return row["id"] if row else None
 
@@ -342,74 +346,81 @@ async def kg_find_path(source: str, target: str) -> str:
         tgt_id = _get_id(target)
 
         if src_id is None:
+            conn.close()
             return None, f"Node '{source}' not found."
         if tgt_id is None:
+            conn.close()
             return None, f"Node '{target}' not found."
 
-        # BFS over adjacency
-        prev: dict[int, tuple[int, str]] = {}
-        queue: deque[int] = deque([src_id])
-        visited = {src_id}
-
+        # BFS
+        prev = {src_id: (None, None)}
+        queue = deque([(src_id, 0)])
+        
         while queue:
-            cur = queue.popleft()
-            if cur == tgt_id:
+            cur_id, depth = queue.popleft()
+            
+            if depth >= max_hops:
+                continue
+            
+            if cur_id == tgt_id:
                 break
+            
             rows = conn.execute("""
-                SELECT
-                    CASE WHEN source_id=? THEN target_id ELSE source_id END as next_id,
+                SELECT 
+                    CASE WHEN source_id=? THEN target_id ELSE source_id END as neighbor_id,
                     relation
                 FROM edges
                 WHERE source_id=? OR target_id=?
-            """, [cur, cur, cur]).fetchall()
-
+            """, (cur_id, cur_id, cur_id)).fetchall()
+            
             for r in rows:
-                nxt = r["next_id"]
-                if nxt not in visited:
-                    visited.add(nxt)
-                    prev[nxt] = (cur, r["relation"])
-                    queue.append(nxt)
-
+                nbr_id = r["neighbor_id"]
+                if nbr_id not in prev:
+                    prev[nbr_id] = (cur_id, r["relation"])
+                    queue.append((nbr_id, depth + 1))
+        
         if tgt_id not in prev:
             conn.close()
-            return None, f"No path found between '{source}' and '{target}'."
+            return None, f"No path found between '{source}' and '{target}' within {max_hops} hops."
 
         # Reconstruct path
-        path: list[tuple[int, str]] = []
+        path_segments = []
         cur = tgt_id
         while cur != src_id:
             p_id, rel = prev[cur]
-            path.append((cur, rel))
+            path_segments.append((cur, rel))
             cur = p_id
-        path.reverse()
-
-        # Resolve names while connection is still open
-        id_to_name: dict[int, str] = {}
-        all_ids = {src_id, tgt_id} | {nid for nid, _ in path}
+        
+        path_segments.reverse()
+        
+        # Resolve IDs to names
+        # Re-open connection for simplicity or pass id_to_name
+        # We need the names for the output string
+        id_to_name = {}
+        # We can reuse the connection if it wasn't closed, but we closed it early on misses.
+        # Let's just grab names again.
+        conn2 = _get_kg_conn()
+        all_ids = [src_id] + [p[0] for p in path_segments]
         for nid in all_ids:
-            row = conn.execute("SELECT name FROM nodes WHERE id=?", (nid,)).fetchone()
+            row = conn2.execute("SELECT name FROM nodes WHERE id=?", (nid,)).fetchone()
             id_to_name[nid] = row["name"] if row else str(nid)
-
-        conn.close()
+        conn2.close()
 
         steps = [id_to_name[src_id]]
-        for nid, rel in path:
+        for nid, rel in path_segments:
             steps.append(f"—[{rel}]→ {id_to_name[nid]}")
-        return steps, None
+        
+        return " → ".join(steps), None
 
-    path, error = await loop.run_in_executor(None, _bfs_path)
-
-    if error:
-        return error
-    return "Path: " + " ".join(path)
-
+    path_str, error = await loop.run_in_executor(None, _bfs_path)
+    return error if error else path_str
 
 async def kg_find_orphans() -> str:
     """Find nodes with no edges — isolated concepts in the graph."""
     loop = asyncio.get_running_loop()
 
     def _find():
-        conn = _get_db()
+        conn = _get_kg_conn()
         rows = conn.execute("""
             SELECT n.name, n.label, n.created_at
             FROM nodes n
@@ -438,7 +449,7 @@ async def kg_find_clusters(min_size: int = 3) -> str:
     loop = asyncio.get_running_loop()
 
     def _cluster():
-        conn = _get_db()
+        conn = _get_kg_conn()
         nodes = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM nodes").fetchall()}
         edges = conn.execute("SELECT source_id, target_id FROM edges").fetchall()
         conn.close()
@@ -492,7 +503,7 @@ async def kg_temporal_query(node: str) -> str:
     loop = asyncio.get_running_loop()
 
     def _query():
-        conn = _get_db()
+        conn = _get_kg_conn()
         n = conn.execute("SELECT id, name, label, created_at FROM nodes WHERE name=?", (node,)).fetchone()
         if not n:
             conn.close()
@@ -539,7 +550,7 @@ async def kg_graph_summary() -> str:
     loop = asyncio.get_running_loop()
 
     def _stats():
-        conn = _get_db()
+        conn = _get_kg_conn()
         n_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         n_edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
 
@@ -615,7 +626,7 @@ async def kg_semantic_expand(query: str, top_k: int = 5) -> str:
     all_entities: set[str] = set(titles)
 
     def _expand(title: str) -> list[str]:
-        conn = _get_db()
+        conn = _get_kg_conn()
         row = conn.execute("SELECT id FROM nodes WHERE name=?", (title,)).fetchone()
         if not row:
             conn.close()

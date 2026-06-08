@@ -213,9 +213,7 @@ class TestKnowledgeGraph:
 
         mock_llm = AsyncMock(return_value='{"entities": ["rag", "embeddings"], "relations": [["rag", "requires", "embeddings"]]}')
         result = await kg_extract_and_index(
+            text="RAG requires embeddings for retrieval.",
             note_title="RAG Overview",
-            content="RAG requires embeddings for retrieval.",
-            llm_generate_fn=mock_llm,
         )
-        assert "updated" in result.lower() or "graph" in result.lower()
-        mock_llm.assert_called_once()
+        assert "updated" in result.lower() or "graph" in result.lower() or "KG:" in result

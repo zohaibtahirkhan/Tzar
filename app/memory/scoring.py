@@ -56,6 +56,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import asyncio
 
 from loguru import logger
 
@@ -302,12 +303,12 @@ def rank_memories_by_score(memory_ids: list[str]) -> list[tuple[float, str]]:
     return scored
 
 
-def prune_low_score_memories(dry_run: bool = False) -> str:
-    """
-    Find and remove memories with composite score below PRUNE_THRESHOLD
-    that are older than PRUNE_MIN_AGE_DAYS.
+# ─── Tool Functions (Fixed for Async Router) ─────────────────────────────────
 
-    Returns a summary string.
+def _sync_prune_low_score_memories(dry_run: bool = False) -> str:
+    """
+    Synchronous implementation of pruning.
+    Separated so it can be run in an executor to avoid blocking the event loop.
     """
     cutoff_date = (datetime.utcnow() - timedelta(days=PRUNE_MIN_AGE_DAYS)).isoformat()
 
@@ -339,8 +340,20 @@ def prune_low_score_memories(dry_run: bool = False) -> str:
     return f"{action} {len(to_prune)} low-score memories (threshold={PRUNE_THRESHOLD:.2f})."
 
 
-def memory_scores_summary() -> str:
-    """Return a human-readable summary of memory scoring stats."""
+async def prune_low_score_memories(dry_run: bool = False) -> str:
+    """
+    Async wrapper for the tool router.
+    Runs the blocking DB operation in an executor.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_prune_low_score_memories, dry_run)
+
+
+def _sync_memory_scores_summary() -> str:
+    """
+    Synchronous implementation of summary.
+    Separated so it can be run in an executor.
+    """
     conn = _get_score_db()
     total = conn.execute("SELECT COUNT(*) FROM memory_scores").fetchone()[0]
     if total == 0:
@@ -368,3 +381,12 @@ def memory_scores_summary() -> str:
         lines.append(f"  [{row['memory_id'][:20]}] importance={row['importance']:.2f} recalled={row['frequency']}x")
 
     return "\n".join(lines)
+
+
+async def memory_scores_summary() -> str:
+    """
+    Async wrapper for the tool router.
+    Runs the blocking DB operation in an executor.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_memory_scores_summary)

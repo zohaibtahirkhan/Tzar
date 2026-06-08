@@ -183,7 +183,7 @@ SQLite-backed directed property graph. Auto-extracts entities from every note sa
 
 ```
 obsidian_create_note() → entity extraction (CamelCase, acronyms, quoted phrases)
-                       → kg_add_from_text() → graph update
+                       → kg_extract_and_index() → graph update
 ```
 
 Tools:

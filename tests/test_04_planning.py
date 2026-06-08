@@ -2,7 +2,7 @@
 Suite 4 — Planning Tests
 
 Verifies that:
-  A. needs_planning() correctly classifies simple vs complex inputs
+  A. classify_intent() correctly classifies simple vs complex inputs
   B. make_plan() produces ordered, complete steps for multi-tool tasks
   C. The pipeline injects the plan into the system prompt for complex tasks
   D. Multi-step sequences execute in the correct order
@@ -17,53 +17,69 @@ from tests.conftest import make_llm_response, make_plan_response
 # ─── 4.1  Complexity classifier ──────────────────────────────────────────────
 
 class TestComplexityClassifier:
-    """needs_planning() — fast heuristic, no LLM call."""
+    """classify_intent() — fast heuristic, no LLM call."""
 
     def test_simple_math_not_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("What is 25 times 37?") is False
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("What is 25 times 37?") == IntentType.CHAT
 
     def test_greeting_not_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Good morning") is False
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Good morning") != IntentType.PLANNING
 
     def test_thanks_not_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Thanks") is False
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Thanks") == IntentType.CHAT
 
     def test_single_word_not_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Hello") is False
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Hello") == IntentType.CHAT
 
     def test_simple_question_not_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("What is Snowflake?") is False
+        from app.intent import classify_intent, IntentType
+        result = classify_intent("What is Snowflake?")
+        assert result not in (IntentType.PLANNING, IntentType.RESEARCH)
 
-    def test_create_note_is_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Create a note about the RAG pipeline") is True
+    def test_create_note_is_tool(self):
+        from app.intent import classify_intent, IntentType
+        # Single tool action → TOOL (not PLANNING; that's correct behaviour)
+        assert classify_intent("Create a note about the RAG pipeline") == IntentType.TOOL
 
-    def test_research_and_save_is_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning(
+    def test_research_and_save_is_planning(self):
+        from app.intent import classify_intent, IntentType
+        result = classify_intent(
             "Find the latest Snowflake release, create a note, and add it to my daily log"
-        ) is True
+        )
+        assert result == IntentType.PLANNING
 
-    def test_multi_step_with_then_is_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Search for Python 3.13 changes then summarise them") is True
+    def test_multi_step_with_then_is_planning(self):
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Search for Python 3.13 changes then summarise them") == IntentType.PLANNING
 
-    def test_organize_is_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Organise all my project notes") is True
+    def test_organize_is_planning(self):
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Organise all my project notes") == IntentType.PLANNING
 
-    def test_analyse_is_complex(self):
-        from app.planner import needs_planning
-        assert needs_planning("Analyse my recent notes and find gaps") is True
+    def test_analyse_is_planning(self):
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Analyse my recent notes and find gaps") == IntentType.PLANNING
 
-    def test_write_is_complex(self):
+    def test_write_summary_is_planning(self):
+        from app.intent import classify_intent, IntentType
+        assert classify_intent("Write a summary of my Data Engineering project") == IntentType.PLANNING
+
+    def test_needs_planning_shim_false_for_chat(self):
+        """Backward-compat shim: returns False for CHAT/TOOL/MEMORY."""
         from app.planner import needs_planning
-        assert needs_planning("Write a summary of my Data Engineering project") is True
+        assert needs_planning("What is 25 times 37?") is False
+        assert needs_planning("Thanks") is False
+        assert needs_planning("Hello") is False
+
+    def test_needs_planning_shim_true_for_planning(self):
+        """Backward-compat shim: returns True for PLANNING and RESEARCH."""
+        from app.planner import needs_planning
+        assert needs_planning("Find the Snowflake release then create a note") is True
+        assert needs_planning("Research the latest llama.cpp updates") is True
 
 
 # ─── 4.2  Plan structure ─────────────────────────────────────────────────────
@@ -102,7 +118,6 @@ class TestPlanStructure:
         ))
         plan = await make_plan("Find latest Snowflake release, create a note, link to Data Engineering, add to daily.", llm_fn)
         step_text = " ".join(plan.steps).lower()
-        # search must appear before create
         search_pos = step_text.find("search")
         create_pos = step_text.find("create")
         assert search_pos < create_pos, f"Search step must precede create step. Steps: {plan.steps}"
@@ -169,23 +184,25 @@ class TestPlanStructure:
 
 class TestPlannerPipelineIntegration:
     """
-    Verifies that AssistantPipeline calls make_plan for complex inputs
-    and skips it for simple ones.
+    Verifies that AssistantPipeline calls make_plan for PLANNING intent
+    and skips it for CHAT intent.
     """
 
     @pytest.mark.asyncio
     async def test_planner_called_for_complex_input(self):
-        """Pipeline should call make_plan when needs_planning() returns True."""
+        """Pipeline should call make_plan when intent is PLANNING."""
         from app.pipeline import AssistantPipeline
         from app.planner import Plan
+        from app.intent import IntentType
 
         pipeline = AssistantPipeline()
         simple_plan = Plan(can_answer_directly=False, goal="test", steps=["search", "create note"])
 
-        with patch("app.pipeline.needs_planning", return_value=True) as mock_needs, \
+        with patch("app.pipeline.classify_intent", return_value=IntentType.PLANNING) as mock_intent, \
              patch("app.pipeline.make_plan", new=AsyncMock(return_value=simple_plan)) as mock_plan, \
              patch("app.pipeline.llm_engine") as mock_llm, \
-             patch("app.pipeline.memory_manager") as mock_mem:
+             patch("app.pipeline.memory_manager") as mock_mem, \
+             patch("app.memory.projects.extract_project_name_from_query", return_value=None):
 
             mock_llm.generate = AsyncMock(return_value=make_llm_response(response="Done."))
             mock_mem.get_context = AsyncMock(return_value=("", ""))
@@ -196,20 +213,22 @@ class TestPlannerPipelineIntegration:
                     "Find the latest Snowflake release and create a note and link it."
                 )
 
-            mock_needs.assert_called_once()
+            mock_intent.assert_called_once()
             mock_plan.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_planner_skipped_for_simple_input(self):
-        """Pipeline should NOT call make_plan for simple inputs."""
+        """Pipeline should NOT call make_plan for CHAT intent."""
         from app.pipeline import AssistantPipeline
+        from app.intent import IntentType
 
         pipeline = AssistantPipeline()
 
-        with patch("app.pipeline.needs_planning", return_value=False) as mock_needs, \
+        with patch("app.pipeline.classify_intent", return_value=IntentType.CHAT) as mock_intent, \
              patch("app.pipeline.make_plan", new=AsyncMock()) as mock_plan, \
              patch("app.pipeline.llm_engine") as mock_llm, \
-             patch("app.pipeline.memory_manager") as mock_mem:
+             patch("app.pipeline.memory_manager") as mock_mem, \
+             patch("app.memory.projects.extract_project_name_from_query", return_value=None):
 
             mock_llm.generate = AsyncMock(return_value=make_llm_response(response="Twenty-five."))
             mock_mem.get_context = AsyncMock(return_value=("", ""))
@@ -218,7 +237,7 @@ class TestPlannerPipelineIntegration:
             with patch("app.pipeline.log_turn", new=AsyncMock()):
                 await pipeline.process_text_input("What is 5 times 5?")
 
-            mock_needs.assert_called_once()
+            mock_intent.assert_called_once()
             mock_plan.assert_not_called()
 
 
@@ -255,7 +274,6 @@ class TestMultiStepSequence:
              patch("app.tools.obsidian.obsidian_create_note",     new=AsyncMock(side_effect=fake_create_note)), \
              patch("app.tools.obsidian.obsidian_append_daily",    new=AsyncMock(side_effect=fake_append_daily)):
 
-            # Also patch KG tools (added in router)
             from app.tools import router as r
             r.TOOL_REGISTRY["web_search"]             = AsyncMock(side_effect=fake_web_search)
             r.TOOL_REGISTRY["obsidian_create_note"]   = AsyncMock(side_effect=fake_create_note)

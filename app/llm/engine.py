@@ -20,6 +20,7 @@ class LLMEngine:
     def __init__(self):
         self._lock = asyncio.Lock()
         self._client: Optional[httpx.AsyncClient] = None
+        self._llm = None
         self._base_url = settings.LLM_OLLAMA_HOST
         self._model = settings.llm_model
         logger.info("Using Ollama URL: {}", self._base_url)
@@ -75,6 +76,7 @@ class LLMEngine:
                     "Model '{}' not found in Ollama. Run: ollama pull {}",
                     self._model, self._model
                 )
+            self._ollama_available = True
             return available
         except Exception as e:
             logger.error("Ollama health check failed: {}", e)
@@ -86,7 +88,7 @@ class LLMEngine:
         """
         if settings.LLM_BACKEND == "ollama":
             try:
-                self.health_check()
+                return getattr(self, "_ollama_available", False)
             except:
                 print("Please pull or run Model")
         if settings.LLM_BACKEND == "llamacpp":
@@ -189,7 +191,6 @@ class LLMEngine:
             raise RuntimeError("LLM not loaded. Call load() first.")
 
         full_messages = [{"role": "system", "content": system_prompt}] + messages
-        print(full_messages)
 
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue[Optional[str]] = asyncio.Queue()

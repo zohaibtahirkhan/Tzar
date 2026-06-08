@@ -208,11 +208,11 @@ def hot_memory_for_prompt() -> str:
         id_to_entry = {_get_memory_id(e): e for e in entries}
         
         # Reorder entries based on rank
-        sorted_entries = [id_to_entry[rid] for rid in ranked_ids if rid in id_to_entry]
+        sorted_entries = [id_to_entry[mid] for _, mid in ranked_ids if mid in id_to_entry]
         
         used = _char_count(sorted_entries)
         pct  = int(used / limit * 100)
-        body = "\n§\n".join(entries)
+        body = "\n§\n".join(sorted_entries)
         sections.append(
             f"══════════════════════════════════════\n"
             f"{label} [{pct}% — {used}/{limit} chars]\n"

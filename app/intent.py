@@ -239,10 +239,28 @@ _PLANNING_SIGNALS: list[tuple[str, bool]] = [
     ("resume ", False),         # "resume work on X"
     ("switch to ", False),      # "switch to X project"
     ("work on ", False),        # "work on X"
+    ("analyse my ", False),      # ← ADD: "Analyse my recent notes and find gaps"
+    ("analyze my ", False),      # ← ADD: covers American spelling too
+    ("write a summary", False),  # ← ADD: "Write a summary of my X project"
+    ("write a report", False), 
 ]
 
 
 # ─── Classifier ───────────────────────────────────────────────────────────────
+def _compile_signals(raw_signals: list[tuple[str, bool]]) -> list[tuple[object, bool]]:
+    compiled = []
+    for pattern, is_regex in raw_signals:
+        if is_regex:
+            compiled.append((re.compile(pattern), True))
+        else:
+            compiled.append((pattern, False))
+    return compiled
+
+_CHAT_SIGNALS = _compile_signals(_CHAT_SIGNALS)
+_MEMORY_SIGNALS = _compile_signals(_MEMORY_SIGNALS)
+_RESEARCH_SIGNALS = _compile_signals(_RESEARCH_SIGNALS)
+_TOOL_SIGNALS = _compile_signals(_TOOL_SIGNALS)
+_PLANNING_SIGNALS = _compile_signals(_PLANNING_SIGNALS)
 
 def _matches(text: str, signals: list[tuple[str, bool]]) -> bool:
     """Return True if any signal matches the lowercased text."""

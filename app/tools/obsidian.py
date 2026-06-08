@@ -26,11 +26,16 @@ from loguru import logger
 
 from app.config import settings
 
+# Public alias — monkeypatched by tests via:
+#   monkeypatch.setattr(obs, "VAULT_PATH", tmp_vault)
+VAULT_PATH: Path = settings.obsidian_vault_path
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _vault() -> Path:
-    p = settings.obsidian_vault_path
+    import app.tools.obsidian as _self
+    p = _self.VAULT_PATH
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -131,8 +136,8 @@ tags: [{", ".join(tags)}]
         await kg_add_from_note(title, [title] + wikilinks, relations)
     
     if settings.kg_auto_extract:
-        from app.tools.knowledge_graph import kg_add_from_text
-        await kg_add_from_text(body, source_note=title)
+        from app.tools.knowledge_graph import kg_extract_and_index
+        await kg_extract_and_index(body, source_note=title)
         
     return f"Note created: {title} (in {folder}/)"
 

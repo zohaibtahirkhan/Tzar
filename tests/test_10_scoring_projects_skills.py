@@ -217,16 +217,16 @@ class TestMemoryScoreDB:
 
     def test_prune_low_score_memories_dry_run(self):
         with self._patch_db():
-            from app.memory.scoring import score_memory, prune_low_score_memories
+            from app.memory.scoring import score_memory, _sync_prune_low_score_memories
             # Write a memory that will have low score
             score_memory("low_mem", "lol the weather is nice")
-            result = prune_low_score_memories(dry_run=True)
+            result = _sync_prune_low_score_memories(dry_run=True)
             assert isinstance(result, str)
 
     def test_memory_scores_summary_empty(self):
         with self._patch_db():
-            from app.memory.scoring import memory_scores_summary
-            result = memory_scores_summary()
+            from app.memory.scoring import _sync_memory_scores_summary
+            result = _sync_memory_scores_summary()
             assert isinstance(result, str)
 
 
@@ -249,7 +249,7 @@ class TestSlugify:
 
     def test_numbers_preserved(self):
         from app.memory.projects import _slugify
-        assert "3" in _slugify("Implementation")
+        assert "3" in _slugify("Phase 3 Implementation")
 
 
 class TestProjectNameExtraction:

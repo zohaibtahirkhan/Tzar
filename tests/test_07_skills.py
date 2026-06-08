@@ -14,7 +14,7 @@ class TestSkillsCRUD:
     def patch_skills_dir(self, tmp_path, monkeypatch):
         import app.memory.skills as sk
         monkeypatch.setattr(sk, "SKILLS_DIR", tmp_path / "skills")
-        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills").mkdir(exist_ok=True)
 
     def test_create_skill(self):
         from app.memory.skills import skill_create, skill_load
@@ -104,7 +104,7 @@ class TestSkillsIndex:
     def patch_skills_dir(self, tmp_path, monkeypatch):
         import app.memory.skills as sk
         monkeypatch.setattr(sk, "SKILLS_DIR", tmp_path / "skills")
-        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills").mkdir(exist_ok=True)
 
     def test_index_empty_when_no_skills(self):
         from app.memory.skills import skills_list
@@ -133,7 +133,7 @@ class TestSkillsIndex:
         monkeypatch.setattr(sk, "SKILLS_DIR", tmp_path / "skills")
         monkeypatch.setattr(hm, "MEMORY_PATH", tmp_path / "MEMORY.md")
         monkeypatch.setattr(hm, "USER_PATH",   tmp_path / "USER.md")
-        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills").mkdir(exist_ok=True)
 
         sk.skill_create("obsidian-capture", "How to capture ideas in Obsidian.", "steps...")
 

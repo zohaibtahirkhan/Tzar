@@ -200,7 +200,7 @@ KNOWLEDGE GRAPH RULES:
 - "how did my thinking on X evolve" → kg_timeline
 - After obsidian_create_note, optionally run kg_add to index the new note's concepts
 
-{{memory_context}}
+{memory_context}
 """
 
 def build_system_prompt(memory_context: str = "", conversation_history: str = "", plan_context: str = "") -> str:

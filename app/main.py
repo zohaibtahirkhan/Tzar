@@ -217,6 +217,7 @@ async def run_query(query: str):
     load_core_models()
 
     response = await pipeline.process_text_input(query)
+    print(f"Assistant: {response}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

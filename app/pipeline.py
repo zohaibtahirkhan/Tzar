@@ -39,7 +39,7 @@ from app.prompts.templates import build_system_prompt, format_tool_result
 from app.utils.timing import LatencyMetrics, Timer
 from app.memory.session_store import log_turn
 from app.intent import classify_intent, IntentType
-from app.planner import make_plan
+from app.planner import make_plan, needs_planning
 
 
 # ── Speech state set by LLM each turn ────────────────────────────────────────
