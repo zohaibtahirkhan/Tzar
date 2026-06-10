@@ -1,4 +1,4 @@
-# Hafiz — Local AI Assistant
+# Tzar — Local AI Assistant
 
 A fully local, privacy-first AI assistant with voice I/O, Obsidian integration, Knowledge Graph, RAG over local documents, multi-agent orchestration, and a self-improving skills system. Runs entirely on-device. Nothing leaves your machine unless you explicitly enable web search.
 
@@ -113,7 +113,7 @@ npm run tauri:dev    # native Tauri window (requires Rust)
 
 ## System Profiler
 
-Hafiz can analyse your hardware and recommend the best model configuration:
+Tzar can analyse your hardware and recommend the best model configuration:
 
 ```bash
 python -m app.system_profiler
@@ -133,7 +133,7 @@ The profiler detects RAM, VRAM, CPU cores, AVX support, and Ollama availability,
 
 ## Intelligence Layers
 
-Hafiz is built in phases of increasing capability. All are opt-in and backward-compatible.
+Tzar is built in phases of increasing capability. All are opt-in and backward-compatible.
 
 ### Intent Classifier (`app/intent.py`)
 
@@ -467,7 +467,7 @@ STT_LANGUAGE=                           # blank = auto-detect (supports Urdu)
 TTS_VOICE=af_heart                      # Kokoro voice ID
 
 # ── Wake Word ──────────────────────────────────────────────────────────────
-WAKE_WORD_PHRASE=Hey Zohaib
+WAKE_WORD_PHRASE=Hey Jarvis
 
 # ── Web Search ─────────────────────────────────────────────────────────────
 WEB_SEARCH_ENABLED=false                # off by default
@@ -495,7 +495,7 @@ MULTI_AGENT_ENABLED=false
 ## Directory Structure
 
 ```
-hafiz/
+tzar/
 ├── app/
 │   ├── main.py                 # Entry point (server/voice/terminal/query modes)
 │   ├── config.py               # All settings, pydantic-settings

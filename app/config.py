@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     # ─── Wake Word ────────────────────────────────────────────────────────────
     wake_word_model: str = "hey_jarvis"   # closest built-in; custom model added later
     wake_word_threshold: float = 0.5
-    wake_word_phrase: str = "Hey Zohaib"
+    wake_word_phrase: str = "Hey Jarvis"
 
     # ─── TTS ──────────────────────────────────────────────────────────────────
     tts_voice: str = "af_heart"    # Kokoro voice id

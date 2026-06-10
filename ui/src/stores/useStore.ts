@@ -92,7 +92,7 @@ export const useStore = create<State>((set) => ({
   health: null,
   setHealth: (h) => set({ health: h }),
 
-  messages: [{ id: "welcome", role: "assistant", content: "Hafiz is ready.", ts: Date.now() }],
+  messages: [{ id: "welcome", role: "assistant", content: "Tzar is ready.", ts: Date.now() }],
   isStreaming: false,
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   appendToken: (id, token) =>

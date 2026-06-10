@@ -1,6 +1,6 @@
-# Hafiz — Desktop UI
+# Tzar — Desktop UI
 
-React + Tauri frontend for the Hafiz assistant backend.
+React + Tauri frontend for the Tzar assistant backend.
 
 ## Prerequisites
 

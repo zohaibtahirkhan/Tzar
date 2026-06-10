@@ -37,7 +37,7 @@ export function Sidebar() {
       <div className="sidebar-logo">
         {!sidebarCollapsed && (
           <div className="logo-text">
-            <span className="logo-hafiz">Hafiz</span>
+            <span className="logo-tzar">Tzar</span>
             {activeProject && <span className="logo-project">{activeProject}</span>}
           </div>
         )}

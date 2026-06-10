@@ -169,7 +169,7 @@ export function ChatPanel() {
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           onKeyDown={handleKey}
-          placeholder="Message Hafiz… (Enter to send, Shift+Enter for newline)"
+          placeholder="Message Tzar… (Enter to send, Shift+Enter for newline)"
           rows={1}
           disabled={isStreaming}
         />

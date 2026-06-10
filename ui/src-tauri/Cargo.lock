@@ -1198,7 +1198,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hafiz"
+name = "tzar"
 version = "0.1.0"
 dependencies = [
  "serde",

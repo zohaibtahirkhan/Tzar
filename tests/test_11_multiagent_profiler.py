@@ -501,7 +501,7 @@ class TestModelRecommender:
         rec = recommend_models(profile)
         report = format_report(profile, rec)
         assert isinstance(report, str)
-        assert "Hafiz System Profile" in report
+        assert "Tzar System Profile" in report
         assert "Recommendation" in report
         assert "env snippet" in report.lower() or ".env" in report
 

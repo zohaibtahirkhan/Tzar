@@ -1,7 +1,7 @@
 {
-  "productName": "Hafiz",
+  "productName": "Tzar",
   "version": "0.1.0",
-  "identifier": "com.hafiz.assistant",
+  "identifier": "com.tzar.assistant",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Hafiz",
+        "title": "Tzar",
         "width": 1100,
         "height": 740,
         "minWidth": 800,
@@ -24,7 +24,7 @@
       "iconPath": "icons/32x32.png",
       "iconAsTemplate": true,
       "menuOnLeftClick": false,
-      "tooltip": "Hafiz"
+      "tooltip": "Tzar"
     },
     "security": {
       "csp": null
@@ -40,7 +40,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Hafiz — local AI assistant",
+    "shortDescription": "Tzar — local AI assistant",
     "longDescription": "Local AI assistant with memory, knowledge graph, and project continuity."
   }
 }

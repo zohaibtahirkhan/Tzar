@@ -1,5 +1,5 @@
 /**
- * src/api.ts — complete typed client for the Hafiz FastAPI backend.
+ * src/api.ts — complete typed client for the Tzar FastAPI backend.
  */
 
 const BASE = "http://127.0.0.1:8000";

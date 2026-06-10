@@ -53,7 +53,7 @@ export function SkillsPanel() {
             );
           })}
           <div className="skills-hint">
-            Hafiz detects repeated tool sequences automatically.
+            Tzar detects repeated tool sequences automatically.
             After 3 occurrences it will ask you to save it as a named skill.
           </div>
         </div>

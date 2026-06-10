@@ -70,7 +70,7 @@ body::after {
   min-height: 54px; gap: 6px;
 }
 .logo-text    { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.logo-hafiz   {
+.logo-tzar   {
   font-family: 'Syne', sans-serif; font-weight: 800; font-size: 1.05rem;
   letter-spacing: -0.02em;
   background: linear-gradient(115deg, #e2e8f0 40%, var(--purple));

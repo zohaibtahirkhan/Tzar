@@ -427,14 +427,13 @@ class AssistantPipeline:
         logger.info("=" * 50)
 
         awaiting_speech = False
-        woke_at: Optional[float] = time.perf_counter()
+        woke_at: Optional[float] = None
 
         async for chunk in microphone.chunks():
             if not self._active:
                 break
 
             if not awaiting_speech:
-                awaiting_speech = True
                 confidence = wake_word_detector.check_chunk(chunk)
                 if wake_word_detector.detected(confidence):
                     self.interrupt()  # stop TTS if speaking

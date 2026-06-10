@@ -1,4 +1,4 @@
-//! src-tauri/src/main.rs — Hafiz desktop shell (Tauri 2)
+//! src-tauri/src/main.rs — Tzar desktop shell (Tauri 2)
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -13,7 +13,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // Build tray menu
-            let show  = MenuItem::with_id(app, "show",  "Show Hafiz", true, None::<&str>)?;
+            let show  = MenuItem::with_id(app, "show",  "Show Tzar", true, None::<&str>)?;
             let hide  = MenuItem::with_id(app, "hide",  "Hide",       true, None::<&str>)?;
             let quit  = MenuItem::with_id(app, "quit",  "Quit",       true, None::<&str>)?;
             let menu  = Menu::with_items(app, &[&show, &hide, &quit])?;
@@ -21,7 +21,7 @@ fn main() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("Hafiz")
+                .tooltip("Tzar")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(win) = app.get_webview_window("main") {
@@ -62,5 +62,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error running Hafiz");
+        .expect("error running Tzar");
 }

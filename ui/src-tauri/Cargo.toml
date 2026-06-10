@@ -1,7 +1,7 @@
 [package]
-name = "hafiz"
+name = "tzar"
 version = "0.1.0"
-description = "Hafiz — Local AI Assistant"
+description = "Tzar — Local AI Assistant"
 authors = ["you"]
 edition = "2021"
 build = "build.rs"
