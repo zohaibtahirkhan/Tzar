@@ -153,6 +153,11 @@ TOOL_REGISTRY: dict[str, Any] = {
     "skill_learning_stats":    skill_learning_stats,
     "confirm_skill_proposal":  confirm_skill_proposal,
     "system_profile": run_system_profile_tool,
+    "goal_list":    lambda **kw: _goal_list(**kw),
+    "goal_status":  lambda **kw: _goal_status(**kw),
+    "goal_abandon": lambda **kw: _goal_abandon(**kw),
+    "browser_action": lambda **kw: _browser_action(**kw),
+    
     # Dynamic MCP tools are added at startup by mcp_registry.connect_all()
     # memory tools are handled inline by ToolRouter (need memory_manager reference)
 }
@@ -388,3 +393,77 @@ class ToolRouter:
             result = await self.dispatch(call)
             results.append(result)
         return clean_text, results
+
+async def _goal_list(**kwargs) -> dict:
+    from app.planning.goal_tracker import goal_tracker
+    summary = await goal_tracker.get_goals_summary()
+    return {"tool": "goal_list", "status": "ok", "result": summary}
+ 
+ 
+async def _goal_status(goal_id: int = 0, **kwargs) -> dict:
+    from app.planning.goal_tracker import goal_tracker
+    if not goal_id:
+        goals = await goal_tracker.get_active_goals()
+        if not goals:
+            return {"tool": "goal_status", "status": "ok", "result": "No active goals."}
+        return {"tool": "goal_status", "status": "ok", "result": goals[0].tree_str()}
+    goal = await goal_tracker.get_goal(goal_id)
+    if not goal:
+        return {"tool": "goal_status", "status": "error", "result": f"Goal #{goal_id} not found."}
+    return {"tool": "goal_status", "status": "ok", "result": goal.tree_str()}
+ 
+ 
+async def _goal_abandon(goal_id: int = 0, **kwargs) -> dict:
+    from app.planning.goal_tracker import goal_tracker
+    if not goal_id:
+        goals = await goal_tracker.get_active_goals()
+        if not goals:
+            return {"tool": "goal_abandon", "status": "ok", "result": "No active goals to abandon."}
+        goal_id = goals[0].id
+    await goal_tracker.abandon_goal(goal_id)
+    return {"tool": "goal_abandon", "status": "ok", "result": f"Goal #{goal_id} abandoned."}
+ 
+ 
+async def _browser_action(task: str = "", url: str = "", **kwargs) -> dict:
+    """
+    Computer use via browser-use.
+    Install: pip install browser-use playwright && playwright install chromium
+    """
+    if not task and not url:
+        return {"tool": "browser_action", "status": "error", "result": "No task or url provided."}
+ 
+    effective_task = task or f"Navigate to {url} and return the main content."
+ 
+    try:
+        from browser_use import Agent
+        from app.llm.engine import llm_engine
+ 
+        # browser-use needs a LangChain-compatible LLM wrapper
+        # If you're using Ollama, use langchain-ollama
+        try:
+            from langchain_ollama import ChatOllama
+            from app.config import settings as _s
+            llm = ChatOllama(model=_s.llm_model, base_url=_s.LLM_OLLAMA_HOST)
+        except ImportError:
+            return {
+                "tool": "browser_action", "status": "error",
+                "result": "browser-use requires langchain-ollama. Run: pip install langchain-ollama"
+            }
+ 
+        agent  = Agent(task=effective_task, llm=llm)
+        result = await agent.run(max_steps=10)
+        return {
+            "tool": "browser_action", "status": "ok",
+            "result": str(result)[:2000],
+        }
+ 
+    except ImportError:
+        return {
+            "tool": "browser_action", "status": "error",
+            "result": (
+                "browser-use not installed.\n"
+                "Run: pip install browser-use playwright && playwright install chromium"
+            ),
+        }
+    except Exception as exc:
+        return {"tool": "browser_action", "status": "error", "result": str(exc)}

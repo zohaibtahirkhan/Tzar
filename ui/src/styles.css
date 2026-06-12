@@ -70,7 +70,7 @@ body::after {
   min-height: 54px; gap: 6px;
 }
 .logo-text    { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.logo-tzar   {
+.logo-tzar {
   font-family: 'Syne', sans-serif; font-weight: 800; font-size: 1.05rem;
   letter-spacing: -0.02em;
   background: linear-gradient(115deg, #e2e8f0 40%, var(--purple));
@@ -101,8 +101,11 @@ body::after {
 .nav-label      { font-size: 0.78rem; letter-spacing: 0.03em; }
 
 .sidebar-footer { padding: 10px 12px; border-top: 1px solid var(--border); text-align: right; flex-shrink: 0; }
-.footer-arabic  { font-family: 'Noto Naskh Arabic', serif; font-size: 1rem; color: var(--muted); }
-
+.footer-cyrillic {
+  font-family: 'Syne', sans-serif; font-weight: 800;
+  font-size: 0.82rem; letter-spacing: 0.18em;
+  color: var(--muted);
+}
 /* ─── Panel shared ───────────────────────────────────────────────────────────── */
 .panel-wrap    { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 

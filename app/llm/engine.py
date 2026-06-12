@@ -116,6 +116,7 @@ class LLMEngine:
                 "temperature": settings.llm_temperature,
                 "num_ctx": settings.llm_context_length,
                 "num_predict": settings.llm_max_tokens,
+                "stop": ["User:", "Human:", "\nUser", "\nHuman", "You:"],
             }
         }
     # For Ollama
@@ -199,6 +200,7 @@ class LLMEngine:
             try:
                 stream = self._llm.create_chat_completion(
                     messages=full_messages,
+                    stop=["User:", "Human:", "\nUser", "\nHuman", "You:"],
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=settings.llm_top_p,

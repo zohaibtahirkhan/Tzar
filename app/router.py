@@ -95,7 +95,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000",
+               "http://localhost:5173", "http://127.0.0.1:5173", "*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -121,6 +122,8 @@ class MemorySaveRequest(BaseModel):
 class WebSearchToggle(BaseModel):
     enabled: bool
 
+class MultiAgentToggle(BaseModel):
+    enabled: bool
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -129,14 +132,17 @@ async def health():
     from app.llm.engine import llm_engine
     from app.audio.stt import stt_engine
     from app.audio.tts import tts_engine
+    from app.audio.wake_word import wake_word_detector
 
     return {
-        "status": "ok",
-        "llm": "loaded" if llm_engine.is_loaded() else "not loaded",
-        "stt": "loaded" if stt_engine.is_loaded() else "not loaded",
-        "tts": "loaded" if tts_engine.is_loaded() else "not loaded",
-        "web_search": settings.web_search_enabled,
-        "workspace": str(settings.workspace_dir),
+        "status":       "ok",
+        "llm":          "loaded" if llm_engine.is_loaded()         else "not loaded",
+        "stt":          "loaded" if stt_engine.is_loaded()         else "not loaded",
+        "tts":          "loaded" if tts_engine.is_loaded()         else "not loaded",
+        "wake_word":    "loaded" if wake_word_detector.is_loaded() else "failed",
+        "web_search":   settings.web_search_enabled,
+        "multi_agent":  settings.multi_agent_enabled,
+        "workspace":    str(settings.workspace_dir),
     }
 
 
@@ -161,11 +167,28 @@ async def chat_stream(req: ChatRequest):
     from app.pipeline import pipeline
 
     async def event_generator():
+        tool_results_collected: list[dict] = []
         try:
             async for chunk in pipeline.process_text_input_streaming(req.message):
-                data = json.dumps({"token": chunk})
-                yield f"data: {data}\n\n"
+                # Status tokens like "[Running tool_name...]" — parse tool result
+                # signals embedded in the stream and collect them
+                if chunk.startswith("[Running ") and chunk.endswith("...]"):
+                    tool_name = chunk[9:-4]
+                    # Emit a status token for the UI to display
+                    data = json.dumps({"token": chunk})
+                    yield f"data: {data}\n\n"
+                else:
+                    data = json.dumps({"token": chunk})
+                    yield f"data: {data}\n\n"
+ 
+            # After all tokens are streamed, emit any collected tool results
+            # so the UI can render expandable tool result rows.
+            # The pipeline stores the last turn's tool results on itself.
+            if hasattr(pipeline, "_last_tool_results") and pipeline._last_tool_results:
+                yield f"data: {json.dumps({'tool_results': pipeline._last_tool_results})}\n\n"
+ 
             yield "data: [DONE]\n\n"
+            
         except Exception as e:
             logger.error("/chat/stream error: {}", e)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -233,6 +256,12 @@ async def toggle_web_search(req: WebSearchToggle):
     logger.info("Web search {} via API", status)
     return {"web_search": req.enabled, "status": status}
 
+@app.post("/settings/multi-agent")
+async def toggle_multi_agent(req: MultiAgentToggle):
+    settings.multi_agent_enabled = req.enabled
+    status = "enabled" if req.enabled else "disabled"
+    logger.info("Multi-agent mode {} via API", status)
+    return {"multi_agent": req.enabled, "status": status}
 
 # ─── WebSocket Audio ──────────────────────────────────────────────────────────
 

@@ -17,36 +17,49 @@ const COLORS: Record<string, string> = {
 };
 const nodeColor = (g: string) => COLORS[g] ?? COLORS.default;
 
+// ─── KG text parser — preserves node groups from backend output ───────────────
+
 function parseKGText(raw: string): { nodes: KGNode[]; edges: KGEdge[] } {
   const nodes: KGNode[] = [];
   const edges: KGEdge[] = [];
   const seen = new Set<string>();
-  const edgeRe = /(\w[\w\s]+?)\s+—\[(.+?)\]→\s+(\w[\w\s]+)/g;
+
+  // Match: "NodeA [group]? —[relation]→ NodeB [group]?"
+  // Group is optional — defaults to "concept"
+  const edgeRe = /([\w][\w\s]+?)\s*(?:\[(\w+)\])?\s*—\[(.+?)\]→\s*([\w][\w\s]+?)\s*(?:\[(\w+)\])?(?:\s|$)/g;
   let m;
   while ((m = edgeRe.exec(raw)) !== null) {
-    const [, s, rel, t] = m;
-    const src = s.trim(); const tgt = t.trim();
-    if (!seen.has(src)) { seen.add(src); nodes.push({ id: src, label: src, group: "concept" }); }
-    if (!seen.has(tgt)) { seen.add(tgt); nodes.push({ id: tgt, label: tgt, group: "concept" }); }
-    edges.push({ source: src, target: tgt, relation: rel.trim() });
+    const src     = m[1].trim();
+    const srcGrp  = m[2]?.trim() ?? "concept";
+    const rel     = m[3].trim();
+    const tgt     = m[4].trim();
+    const tgtGrp  = m[5]?.trim() ?? "concept";
+
+    if (!seen.has(src)) { seen.add(src); nodes.push({ id: src, label: src, group: srcGrp }); }
+    if (!seen.has(tgt)) { seen.add(tgt); nodes.push({ id: tgt, label: tgt, group: tgtGrp }); }
+    edges.push({ source: src, target: tgt, relation: rel });
   }
-  const clusterRe = /Cluster\s+\d+[^:]*:\s+(.+)/g;
+
+  // Cluster lines: "Cluster N (Type): NodeA, NodeB, ..."
+  const clusterRe = /Cluster\s+\d+\s*(?:\((\w+)\))?[^:]*:\s+(.+)/g;
   while ((m = clusterRe.exec(raw)) !== null) {
-    m[1].split(",").forEach(name => {
+    const grp = m[1]?.toLowerCase() ?? "concept";
+    m[2].split(",").forEach(name => {
       const n = name.trim().replace(/\s*\(\+\d+ more\)/, "");
-      if (n && !seen.has(n)) { seen.add(n); nodes.push({ id: n, label: n, group: "concept" }); }
+      if (n && !seen.has(n)) { seen.add(n); nodes.push({ id: n, label: n, group: grp }); }
     });
   }
+
   return { nodes, edges };
 }
 
 export function GraphPanel() {
-  const svgRef = useRef<SVGSVGElement>(null);
+  const svgRef  = useRef<SVGSVGElement>(null);
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown>>();
   const { kgNodes, kgEdges, kgLoading, setKG, setKGLoading } = useStore();
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
-  const [pathA, setPathA] = useState("");
-  const [pathB, setPathB] = useState("");
+  const [pathA, setPathA]     = useState("");
+  const [pathB, setPathB]     = useState("");
   const [pathResult, setPathResult] = useState("");
 
   const loadGraph = useCallback(async () => {
@@ -65,7 +78,7 @@ export function GraphPanel() {
   const expandNode = useCallback(async (nodeId: string) => {
     const res = await invokeTool("kg_neighbors", { node: nodeId, depth: 1 });
     const { nodes: newN, edges: newE } = parseKGText(res.result ?? "");
-    const existIds = new Set(kgNodes.map(n => n.id));
+    const existIds   = new Set(kgNodes.map(n => n.id));
     const existEdges = new Set(kgEdges.map(e => `${e.source}|${e.target}|${e.relation}`));
     setKG(
       [...kgNodes, ...newN.filter(n => !existIds.has(n.id))],
@@ -89,15 +102,15 @@ export function GraphPanel() {
       .map(e => ({ source: idMap.get(e.source as string) ?? e.source, target: idMap.get(e.target as string) ?? e.target, relation: e.relation }))
       .filter(l => typeof l.source === "object" && typeof l.target === "object");
 
-    const g = svg.append("g");
+    const g    = svg.append("g");
     const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.15, 5]).on("zoom", ev => g.attr("transform", ev.transform));
     zoomRef.current = zoom;
     svg.call(zoom);
 
     const sim = d3.forceSimulation<SimNode>(simNodes)
-      .force("link", d3.forceLink<SimNode, SimLink>(simLinks).id(d => d.id).distance(85))
-      .force("charge", d3.forceManyBody().strength(-200))
-      .force("center", d3.forceCenter(W / 2, H / 2))
+      .force("link",    d3.forceLink<SimNode, SimLink>(simLinks).id(d => d.id).distance(85))
+      .force("charge",  d3.forceManyBody().strength(-200))
+      .force("center",  d3.forceCenter(W / 2, H / 2))
       .force("collide", d3.forceCollide(22));
 
     const linkSel = g.append("g").selectAll("line").data(simLinks).enter().append("line")

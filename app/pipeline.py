@@ -38,8 +38,9 @@ from app.tools.router import ToolRouter, extract_tool_calls, strip_tool_calls
 from app.prompts.templates import build_system_prompt, format_tool_result
 from app.utils.timing import LatencyMetrics, Timer
 from app.memory.session_store import log_turn
-from app.intent import classify_intent, IntentType
+from app.intent import classify, classify_intent, IntentType, Capabilities
 from app.planner import make_plan, needs_planning
+from app.planning.goal_tracker import goal_tracker
 
 
 # ── Speech state set by LLM each turn ────────────────────────────────────────
@@ -94,6 +95,7 @@ class AssistantPipeline:
         self._interrupted = False
         self._speech_meta = SpeechMeta()   # updated each turn by LLM
         self._interruptible = True
+        self._last_tool_results: list[dict] = []
 
     def _extract_speech_meta(self, data: dict) -> SpeechMeta:
         s = data.get("speech", {})
@@ -105,270 +107,692 @@ class AssistantPipeline:
 
     async def process_text_input(self, user_text: str) -> str:
         """
-        Full pipeline:
-          1. Build prompt with selective memory
-          2. Classify Intent (NEW: Research vs Planning vs Chat)
-          3. If tool requested -> execute -> second LLM call for final response
-          4. Extract spoken response text + store speech pacing metadata
-          5. Return ONLY the spoken text (never raw JSON)
+        Full pipeline with multi-label capabilities routing and goal tracking.
         """
         logger.info("User: {}", user_text)
-
+    
         memory_ctx, conv_history = await memory_manager.get_context(user_text)
-
-        # ── NEW: Intent Classification (replaces needs_planning) ──
-        intent = classify_intent(user_text)
+    
+        # ── Multi-label capabilities classification (replaces single-label intent) ─
+        caps = classify(user_text)
+        logger.info("Capabilities: {}", caps.as_dict())
         
-        # ── Project Continuity auto-detect ───────────────────────────
+        # ── Memory write short-circuit ────────────────────────────────────────────
+
+        _SAVE_TRIGGERS = re.compile(
+            r"\b("
+            r"remember that|"
+            r"remember this|"
+            r"save this|"
+            r"note that|"
+            r"my name is|"
+            r"i prefer|"
+            r"i use|"
+            r"i am working on"
+            r")\b",
+            re.IGNORECASE,
+        )
+
+        if caps.needs_memory and _SAVE_TRIGGERS.search(user_text):
+
+            fact = user_text.strip()
+
+            category = (
+                "preference"
+                if "prefer" in user_text.lower()
+                else "fact"
+            )
+
+            try:
+                await memory_manager.long_term.save(
+                    category=category,
+                    content=fact,
+                )
+            except Exception:
+                logger.exception("Failed to save memory")
+                return "I couldn't save that memory."
+
+            response = "Got it, I've saved that."
+
+            await memory_manager.add_turn(
+                user_text,
+                response,
+            )
+
+            await log_turn("user", user_text)
+            await log_turn("assistant", response)
+
+            return response
+    
+        # ── Project continuity ────────────────────────────────────────────────────
         from app.memory.projects import extract_project_name_from_query, project_switch
         project_name = extract_project_name_from_query(user_text)
         if project_name:
             return await project_switch(project_name)
-
-        # ── Multi-Agent Orchestrator (opt-in) ───────────────────────
-        if settings.multi_agent_enabled:
+    
+        # ── Goal continuation check ───────────────────────────────────────────────
+        if goal_tracker.is_continuation(user_text):
+            active_goals = await goal_tracker.get_active_goals()
+            if active_goals:
+                return await goal_tracker.resume_response(active_goals[0])
+    
+        # ── Coordinator (multi-step, multi-capability) ────────────────────────────
+        if settings.multi_agent_enabled and caps.is_complex():
+            from app.agents.coordinator import coordinator
+            logger.info("Routing to Coordinator — capabilities: {}", caps.primary)
+            return await coordinator.run(user_text, caps)
+    
+        # ── Legacy 5-agent orchestrator (experimental) ────────────────────────────
+        if getattr(settings, "multi_agent_experimental", False):
             from app.agents.orchestrator import orchestrator
-            logger.info("Multi-Agent mode enabled. Routing to Orchestrator.")
-            return await orchestrator.run(user_text, intent.value)
-
-        # ── NEW: Research Agent short-circuit ─────────────────────
-        if intent == IntentType.RESEARCH:
+            return await orchestrator.run(user_text, classify_intent(user_text).value)
+    
+        # ── Research Agent ─────────────────────────────────────────────────────────
+        if caps.needs_research and not caps.needs_tools:
             from app.agents.researcher import research_agent
-            logger.info("Intent: RESEARCH - routing to Research Agent")
-            
-            # Run the specialized research agent
+            logger.info("Routing to ResearchAgent")
             response = await research_agent.run(user_text)
-            
-            # Archive the turn to memory (consistent with standard flow)
             await memory_manager.add_turn(user_text, response)
             await log_turn("user", user_text)
             await log_turn("assistant", response)
-            
-            # Return the result directly (skips standard tool loop)
             return response
-
-        # ── Existing planner branch (updated check) ───────────────────
+    
+        # ── Planning: persist goal if multi-step ─────────────────────────────────
         plan_context = ""
-        if intent == IntentType.PLANNING:
+        if caps.needs_planning:
             plan = await make_plan(user_text, llm_engine.generate)
             plan_context = plan.to_context_string()
             if plan_context:
-                logger.info("Plan injected into prompt.")
-
+                logger.info("Plan injected into prompt")
+                # Persist the goal for long-horizon tracking
+                if len(plan.steps) >= 3:
+                    step_dicts = [
+                        {"description": s, "tool": t, "params": {}}
+                        for s, t in zip(plan.steps, plan.required_tools + [""] * len(plan.steps))
+                    ]
+                    asyncio.create_task(
+                        goal_tracker.create_goal(user_text, step_dicts)
+                    )
+    
         system_prompt = build_system_prompt(memory_ctx, conv_history, plan_context)
         messages = [{"role": "user", "content": user_text}]
-
-        # ── First LLM call ────────────────────────────────────────────────────
+    
+        # ── First LLM call ────────────────────────────────────────────────────────
         raw = await llm_engine.generate(messages, system_prompt)
         logger.info("LLM raw: {}", raw[:300])
-
         data = _parse_llm_json(raw)
         tool_name   = data.get("tool")
         tool_params = data.get("tool_params") or {}
-
-        # ── Tool execution loop (up to 4 steps) ───────────────────────────────
+    
+        # ── Tool execution loop (up to 4 steps) ───────────────────────────────────
+        self._last_tool_results = []
         iterations = 0
         while tool_name and iterations < 4:
             iterations += 1
             logger.info("Tool #{}: {} {}", iterations, tool_name, tool_params)
-
             try:
                 result = await asyncio.wait_for(
                     self.tool_router.dispatch({"tool": tool_name, **tool_params}),
-                    timeout=30.0
+                    timeout=30.0,
                 )
             except asyncio.TimeoutError:
-                logger.error("Tool '{}' timed out after 30s", tool_name)
                 result = {"tool": tool_name, "status": "error", "result": "Tool timed out."}
-                
+    
             result_text = result["result"]
             logger.info("Tool result ({}): {}", result["status"], result_text[:200])
-
+    
+            # Track for SSE emission
+            self._last_tool_results.append({
+                "tool":   result.get("tool", tool_name),
+                "status": result.get("status", "ok"),
+                "result": str(result_text)[:800],
+            })
+    
             followup = messages + [
                 {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Tool '{tool_name}' returned:\n{result_text}\n\n"
-                        "If you need another tool, output JSON with tool and tool_params. "
-                        "If done, output JSON with thought, response, and speech fields only."
-                    ),
-                },
+                {"role": "user", "content": (
+                    f"Tool '{tool_name}' returned:\n{result_text}\n\n"
+                    "If you need another tool, output JSON with tool and tool_params. "
+                    "If done, output JSON with thought, response, and speech fields only."
+                )},
             ]
-            raw = await llm_engine.generate(followup, system_prompt)
-            logger.info("LLM followup: {}", raw[:300])
-
-            data = _parse_llm_json(raw)
+            raw         = await llm_engine.generate(followup, system_prompt)
+            data        = _parse_llm_json(raw)
             tool_name   = data.get("tool")
             tool_params = data.get("tool_params") or {}
-
-        # ── Confidence: log low-confidence answers ────────────────────────────
+    
         confidence = data.get("confidence", 0.9)
         if confidence < 0.6:
-            logger.warning(
-                "Low confidence response ({:.0%}) — '{}...'",
-                confidence, (data.get("response") or "")[:60],
-            )
-            
-        # ── Extract spoken response (NEVER the raw JSON) ──────────────────────
-        spoken = (data.get("response") or "").strip()
-        if not spoken:
-            # Model didn't follow format — use the raw output as fallback
-            spoken = strip_tool_calls(raw).strip()
-            # If it still looks like JSON, pull just the response field value out
-            if spoken.startswith("{"):
-                spoken = "Done."
-
-        # ── Store LLM pacing decisions for speak() ────────────────────────────
-        self._speech_meta = self._extract_speech_meta(data)
-        self._interruptible = data.get("interruptible", True)
-        logger.info(
-            "Speech meta: pace={} pause_ms={} tone={} interruptible={}",
-            self._speech_meta.pace, self._speech_meta.pause_ms,
-            self._speech_meta.tone, self._interruptible,
-        )
-
-        logger.info("Assistant: {}", spoken[:120])
-        await memory_manager.add_turn(user_text, spoken)
-        await log_turn("user", user_text)
-        await log_turn("assistant", spoken)
-
-        # Auto-suggest skill creation after complex multi-tool tasks
-        if iterations >= 3:
-            logger.info("Complex task ({} tool calls) — LLM may want to save a skill.", iterations)
-
-        return spoken
-
-    async def process_text_input_streaming(self, user_text: str) -> AsyncIterator[str]:
-        """
-        Resolves the full response (including any tool calls), then yields
-        clause-by-clause for low-latency TTS chaining.
-        Never yields raw JSON — only the spoken response text.
-        """
-        logger.info("User (stream): {}", user_text)
-
-        memory_ctx, conv_history = await memory_manager.get_context(user_text)
-
-        # ── NEW: Intent Classification ─────────────────────────────────────────
-        intent = classify_intent(user_text)
-
-        # ── Project Continuity auto-detect ───────────────────────────
-        from app.memory.projects import extract_project_name_from_query, project_switch
-        project_name = extract_project_name_from_query(user_text)
-        if project_name:
-            result = await project_switch(project_name)
-            yield result
-            return
-
-        # ── Multi-Agent Orchestrator (opt-in) ───────────────────────
-        if settings.multi_agent_enabled:
-            from app.agents.orchestrator import orchestrator
-            logger.info("Multi-Agent mode enabled. Routing to Orchestrator.")
-            result = await orchestrator.run(user_text, intent.value)
-
-            yield result
-            return
-                
-        # ── NEW: Research Agent short-circuit ─────────────────────────────────
-        if intent == IntentType.RESEARCH:
-            from app.agents.researcher import research_agent
-            logger.info("Intent: RESEARCH (stream) - routing to Research Agent")
-            
-            # Yield a status update so UI knows work is happening
-            yield "[Researching...]"
-            
-            response = await research_agent.run(user_text)
-            
-            # Archive
-            await memory_manager.add_turn(user_text, response)
-            await log_turn("user", user_text)
-            await log_turn("assistant", response)
-            
-            # Stream the result out sentence by sentence
-            for clause in split_into_sentences(response):
-                if clause.strip():
-                    yield clause
-            return # Stop execution here
-
-        # ── Planner for complex multi-step ────────────────────────────────
-        plan_context = ""
-        if intent == IntentType.PLANNING:
-            plan = await make_plan(user_text, llm_engine.generate)
-            plan_context = plan.to_context_string()
-            if plan_context:
-                logger.info("Plan injected into prompt.")
-
-        system_prompt = build_system_prompt(memory_ctx, conv_history, plan_context)
-        messages = [{"role": "user", "content": user_text}]
-
-        raw = await llm_engine.generate(messages, system_prompt)
-        logger.info("LLM raw (stream): {}", raw[:300])
-
-        data = _parse_llm_json(raw)
-        tool_name   = data.get("tool")
-        tool_params = data.get("tool_params") or {}
-
-        iterations = 0
-        while tool_name and iterations < 4:
-            iterations += 1
-            yield f"[Running {tool_name}...]"   # status token — caller can display/ignore
-
-            try:
-                result = await asyncio.wait_for(
-                    self.tool_router.dispatch({"tool": tool_name, **tool_params}),
-                    timeout=30.0
-                )
-            except asyncio.TimeoutError:
-                logger.error("Tool '{}' timed out after 30s", tool_name)
-                result = {"tool": tool_name, "status": "error", "result": "Tool timed out."}
-                
-            result_text = result["result"]
-
-            followup = messages + [
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Tool '{tool_name}' returned:\n{result_text}\n\n"
-                        "If done, output JSON with thought, response, and speech fields only."
-                    ),
-                },
-            ]
-            raw = await llm_engine.generate(followup, system_prompt)
-            data = _parse_llm_json(raw)
-            tool_name   = data.get("tool")
-            tool_params = data.get("tool_params") or {}
-
-        # ── Confidence: log low-confidence answers ────────────────────────────
-        confidence = data.get("confidence", 0.9)
-        if confidence < 0.6:
-            logger.warning(
-                "Low confidence response ({:.0%}) — '{}...'",
-                confidence, (data.get("response") or "")[:60],
-            )
-            
+            logger.warning("Low confidence ({:.0%})", confidence)
+    
         spoken = (data.get("response") or "").strip()
         if not spoken:
             spoken = strip_tool_calls(raw).strip()
         if spoken.startswith("{"):
             spoken = "Done."
-
-        self._speech_meta = self._extract_speech_meta(data)
+    
+        self._speech_meta   = self._extract_speech_meta(data)
         self._interruptible = data.get("interruptible", True)
-        logger.info(
-            "Speech meta: pace={} pause_ms={} tone={} interruptible={}",
-            self._speech_meta.pace, self._speech_meta.pause_ms,
-            self._speech_meta.tone, self._interruptible,
-        )
+    
+        logger.info("Assistant: {}", spoken[:120])
         await memory_manager.add_turn(user_text, spoken)
         await log_turn("user", user_text)
         await log_turn("assistant", spoken)
+    
+        return spoken
 
-        # Yield clause by clause so caller can pipe directly into TTS
+    async def process_text_input_streaming(
+        self,
+        user_text: str
+    ) -> AsyncIterator[str]:
+        """
+        Full streaming pipeline with:
+        - capability-based routing
+        - project continuity
+        - goal continuation
+        - coordinator escalation
+        - planning support
+        - research short-circuit
+        - resilient tool execution
+        - SSE-safe tool tracking
+        - low-latency clause streaming
+        """
+
+        logger.info("User (stream): {}", user_text)
+
+        # IMPORTANT:
+        # This assumes pipeline instances are request-scoped.
+        # If not, move these into request-local state.
+        self._last_tool_results = []
+
+        memory_ctx, conv_history = await memory_manager.get_context(user_text)
+
+        # ─────────────────────────────────────────────────────────────
+        # Multi-label capability classification
+        # ─────────────────────────────────────────────────────────────
+
+        caps = classify(user_text)
+        logger.info("Capabilities (stream): {}", caps.as_dict())
+
+        # ── Memory write short-circuit ────────────────────────────────────────────
+        _SAVE_TRIGGERS = re.compile(
+            r"\b("
+            r"remember that|"
+            r"remember this|"
+            r"save this|"
+            r"note that|"
+            r"my name is|"
+            r"i prefer|"
+            r"i use|"
+            r"i am working on"
+            r")\b",
+            re.IGNORECASE,
+        )
+
+        if caps.needs_memory and _SAVE_TRIGGERS.search(user_text):
+
+            fact = user_text.strip()
+
+            category = (
+                "preference"
+                if "prefer" in user_text.lower()
+                else "fact"
+            )
+
+            try:
+                await memory_manager.long_term.save(
+                    category=category,
+                    content=fact,
+                )
+            except Exception:
+                logger.exception("Failed to save memory")
+                return "I couldn't save that memory."
+
+            response = "Got it, I've saved that."
+
+            await memory_manager.add_turn(
+                user_text,
+                response,
+            )
+
+            await log_turn("user", user_text)
+            await log_turn("assistant", response)
+
+            return response
+
+        # ─────────────────────────────────────────────────────────────
+        # Project continuity auto-detect
+        # ─────────────────────────────────────────────────────────────
+
+        from app.memory.projects import (
+            extract_project_name_from_query,
+            project_switch,
+        )
+
+        project_name = extract_project_name_from_query(user_text)
+
+        if project_name:
+            result = await project_switch(project_name)
+
+            for clause in split_into_sentences(result):
+                if clause.strip():
+                    yield clause
+
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Goal continuation
+        # ─────────────────────────────────────────────────────────────
+
+        if goal_tracker.is_continuation(user_text):
+
+            active_goals = await goal_tracker.get_active_goals()
+
+            if active_goals:
+                result = await goal_tracker.resume_response(active_goals[0])
+
+                for clause in split_into_sentences(result):
+                    if clause.strip():
+                        yield clause
+
+                return
+
+        # ─────────────────────────────────────────────────────────────
+        # Multi-agent coordinator
+        # ─────────────────────────────────────────────────────────────
+
+        if settings.multi_agent_enabled and caps.is_complex():
+
+            from app.agents.coordinator import coordinator
+
+            logger.info(
+                "Routing to Coordinator (stream) — capabilities: {}",
+                caps.primary,
+            )
+
+            result = await coordinator.run(user_text, caps)
+
+            await memory_manager.add_turn(user_text, result)
+            await log_turn("user", user_text)
+            await log_turn("assistant", result)
+
+            for clause in split_into_sentences(result):
+                if clause.strip():
+                    yield clause
+
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Legacy experimental orchestrator
+        # ─────────────────────────────────────────────────────────────
+
+        if getattr(settings, "multi_agent_experimental", False):
+
+            from app.agents.orchestrator import orchestrator
+
+            result = await orchestrator.run(
+                user_text,
+                classify_intent(user_text).value,
+            )
+
+            await memory_manager.add_turn(user_text, result)
+            await log_turn("user", user_text)
+            await log_turn("assistant", result)
+
+            for clause in split_into_sentences(result):
+                if clause.strip():
+                    yield clause
+
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Research agent short-circuit
+        # ─────────────────────────────────────────────────────────────
+
+        if caps.needs_research and not caps.needs_tools:
+
+            from app.agents.researcher import research_agent
+
+            logger.info("Routing to ResearchAgent (stream)")
+
+            yield "[Researching...]"
+
+            response = await research_agent.run(user_text)
+
+            await memory_manager.add_turn(user_text, response)
+            await log_turn("user", user_text)
+            await log_turn("assistant", response)
+
+            for clause in split_into_sentences(response):
+                if clause.strip():
+                    yield clause
+
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Planning
+        # ─────────────────────────────────────────────────────────────
+
+        plan_context = ""
+
+        if caps.needs_planning:
+
+            plan = await make_plan(user_text, llm_engine.generate)
+
+            plan_context = plan.to_context_string()
+
+            if plan_context:
+                logger.info("Plan injected into prompt (stream)")
+
+            # Persist long-horizon goals
+            if len(plan.steps) >= 3:
+
+                from itertools import zip_longest
+
+                step_dicts = [
+                    {
+                        "description": step,
+                        "tool": tool or "",
+                        "params": {},
+                    }
+                    for step, tool in zip_longest(
+                        plan.steps,
+                        plan.required_tools,
+                        fillvalue="",
+                    )
+                ]
+
+                async def _persist_goal():
+                    try:
+                        await goal_tracker.create_goal(
+                            user_text,
+                            step_dicts,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist goal"
+                        )
+
+                asyncio.create_task(_persist_goal())
+
+        # ─────────────────────────────────────────────────────────────
+        # Prompt build
+        # ─────────────────────────────────────────────────────────────
+
+        system_prompt = build_system_prompt(
+            memory_ctx,
+            conv_history,
+            plan_context,
+        )
+
+        messages = [
+            {
+                "role": "user",
+                "content": user_text,
+            }
+        ]
+
+        # ─────────────────────────────────────────────────────────────
+        # First LLM call
+        # ─────────────────────────────────────────────────────────────
+
+        raw = await llm_engine.generate(
+            messages,
+            system_prompt,
+        )
+
+        logger.info("LLM raw (stream): {}", raw[:300])
+
+        try:
+            data = _parse_llm_json(raw)
+
+        except Exception:
+
+            logger.exception(
+                "Failed to parse LLM JSON response"
+            )
+
+            data = {
+                "response": strip_tool_calls(raw).strip(),
+                "confidence": 0.3,
+            }
+
+        tool_name = data.get("tool")
+        tool_params = data.get("tool_params") or {}
+
+        # ─────────────────────────────────────────────────────────────
+        # Tool execution loop
+        # ─────────────────────────────────────────────────────────────
+
+        iterations = 0
+        seen_calls = set()
+
+        while tool_name and iterations < 4:
+
+            iterations += 1
+
+            # Detect repeated tool loops
+            try:
+                call_sig = (
+                    tool_name,
+                    json.dumps(tool_params, sort_keys=True),
+                )
+            except Exception:
+                call_sig = (
+                    tool_name,
+                    str(tool_params),
+                )
+
+            if call_sig in seen_calls:
+
+                logger.warning(
+                    "Repeated tool loop detected: {}",
+                    tool_name,
+                )
+
+                break
+
+            seen_calls.add(call_sig)
+
+            logger.info(
+                "Tool #{} (stream): {} {}",
+                iterations,
+                tool_name,
+                tool_params,
+            )
+
+            yield f"[Running {tool_name}...]"
+
+            import time
+
+            start = time.monotonic()
+
+            try:
+
+                result = await asyncio.wait_for(
+                    self.tool_router.dispatch(
+                        {
+                            "tool": tool_name,
+                            **tool_params,
+                        }
+                    ),
+                    timeout=30.0,
+                )
+
+            except asyncio.TimeoutError:
+
+                logger.error(
+                    "Tool '{}' timed out after 30s",
+                    tool_name,
+                )
+
+                result = {
+                    "tool": tool_name,
+                    "status": "error",
+                    "result": "Tool timed out.",
+                }
+
+            except Exception:
+
+                logger.exception(
+                    "Tool '{}' failed",
+                    tool_name,
+                )
+
+                result = {
+                    "tool": tool_name,
+                    "status": "error",
+                    "result": "Tool execution failed.",
+                }
+
+            duration_ms = int(
+                (time.monotonic() - start) * 1000
+            )
+
+            result_text = str(
+                result.get("result", "")
+            )
+
+            logger.info(
+                "Tool result ({} | {}ms): {}",
+                result.get("status", "ok"),
+                duration_ms,
+                result_text[:200],
+            )
+
+            # Track tool results for SSE/UI
+            self._last_tool_results.append(
+                {
+                    "tool": result.get(
+                        "tool",
+                        tool_name,
+                    ),
+                    "status": result.get(
+                        "status",
+                        "ok",
+                    ),
+                    "result": result_text[:800],
+                    "duration_ms": duration_ms,
+                }
+            )
+
+            # ─────────────────────────────────────────────────────────
+            # Follow-up LLM call
+            # ─────────────────────────────────────────────────────────
+
+            followup = messages + [
+                {
+                    "role": "assistant",
+                    "content": raw,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Tool '{tool_name}' returned:\n"
+                        f"{result_text}\n\n"
+                        "If you need another tool, "
+                        "output JSON with tool and tool_params. "
+                        "If done, output JSON with "
+                        "thought, response, and speech fields only."
+                    ),
+                },
+            ]
+
+            raw = await llm_engine.generate(
+                followup,
+                system_prompt,
+            )
+
+            try:
+
+                data = _parse_llm_json(raw)
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to parse follow-up LLM JSON"
+                )
+
+                data = {
+                    "response": strip_tool_calls(raw).strip(),
+                    "confidence": 0.3,
+                }
+
+                break
+
+            tool_name = data.get("tool")
+            tool_params = data.get("tool_params") or {}
+
+        # ─────────────────────────────────────────────────────────────
+        # Confidence monitoring
+        # ─────────────────────────────────────────────────────────────
+
+        confidence = data.get("confidence", 0.9)
+
+        if confidence < 0.6:
+
+            logger.warning(
+                "Low confidence response ({:.0%}) — '{}...'",
+                confidence,
+                (data.get("response") or "")[:60],
+            )
+
+        # ─────────────────────────────────────────────────────────────
+        # Final spoken response
+        # ─────────────────────────────────────────────────────────────
+
+        spoken = (data.get("response") or "").strip()
+
+        if not spoken:
+            spoken = strip_tool_calls(raw).strip()
+
+        if spoken.startswith("{"):
+            spoken = "Done."
+
+        # ─────────────────────────────────────────────────────────────
+        # Speech metadata
+        # ─────────────────────────────────────────────────────────────
+
+        self._speech_meta = self._extract_speech_meta(
+            data
+        )
+
+        self._interruptible = data.get(
+            "interruptible",
+            True,
+        )
+
+        logger.info(
+            "Speech meta: "
+            "pace={} pause_ms={} tone={} "
+            "interruptible={}",
+            self._speech_meta.pace,
+            self._speech_meta.pause_ms,
+            self._speech_meta.tone,
+            self._interruptible,
+        )
+
+        # ─────────────────────────────────────────────────────────────
+        # Memory + logs
+        # ─────────────────────────────────────────────────────────────
+
+        await memory_manager.add_turn(
+            user_text,
+            spoken,
+        )
+
+        await log_turn("user", user_text)
+        await log_turn("assistant", spoken)
+
+        # ─────────────────────────────────────────────────────────────
+        # Stream clause-by-clause
+        # ─────────────────────────────────────────────────────────────
+
         for clause in split_into_sentences(spoken):
+
             if clause.strip():
                 yield clause
-
+            
     async def speak(self, text: str) -> None:
         """
         Synthesize and play text using the pacing the LLM decided this turn.

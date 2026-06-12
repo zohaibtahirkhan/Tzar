@@ -237,20 +237,47 @@ async def kg_add_from_note(
     return f"Updated Knowledge Graph: +{added_nodes} nodes, +{added_edges} edges (from '{title}')"
 
 
-async def kg_extract_and_index(text: str, source_note: str = "", note_title: str = "") -> str:
+async def kg_extract_and_index(
+    text: str,
+    source_note: str = "",
+    note_title: str = "",
+    content: str = "",          # alias for text — accepted for API compat
+    llm_generate_fn=None,       # accepted but unused — LLM called internally
+) -> str:
     """
-    Auto-extract entities from raw text and add them to the graph.
-    Used by the auto-extraction hook in obsidian_create_note.
-
-    This is the 'active KG' function — call it whenever a note is saved.
+    Two-pass entity + triple extraction:
+      Pass 1 (fast, regex)  — extract noun/acronym candidates
+      Pass 2 (LLM, ~1s)    — extract (subject, relation, object) triples
+ 
+    Falls back to co-occurrence edges if LLM call fails.
     """
-    # If note_title is provided, prefer it as the source_note
+    effective_text   = content or text
     effective_source = note_title or source_note or "auto"
-    entities = extract_entities(text)
+ 
+    if not effective_text.strip():
+        return "KG: no text provided"
+ 
+    # ── Pass 1: regex entity extraction (existing) ────────────────────────────
+    entities = extract_entities(effective_text)
+ 
+    # ── Pass 2: LLM triple extraction ─────────────────────────────────────────
+    try:
+        from app.tools.kg_triple_extraction import extract_triples_llm, merge_into_kg
+        triples = await extract_triples_llm(effective_text)
+ 
+        if triples:
+            return await merge_into_kg(effective_source, entities, triples)
+ 
+        # LLM gave no triples — fall through to co-occurrence
+        logger.debug("KG: LLM returned no triples, using co-occurrence fallback")
+    except Exception as exc:
+        logger.warning("KG triple extraction unavailable: {} — using co-occurrence", exc)
+ 
+    # ── Fallback: co-occurrence relations (original behaviour) ────────────────
     if not entities:
         return "KG: no entities extracted"
-
-    relations = infer_relations(entities, source_note)
+ 
+    relations = infer_relations(entities, effective_source)
     return await kg_add_from_note(effective_source, entities, relations)
 
 

@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     llm_model_path: Path = BASE_DIR / "models" / "qwen2.5-3b-instruct-q4_k_m.gguf"
     llm_context_length: int = 4096
     llm_threads: int = 6          # leave 2 threads for OS / audio
-    llm_max_tokens: int = 512
+    llm_max_tokens: int = 400
     llm_temperature: float = 0.7
     llm_top_p: float = 0.9
     llm_repeat_penalty: float = 1.1
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     audio_output_device: int | None = None
 
     # ─── Memory ───────────────────────────────────────────────────────────────
-    memory_short_term_limit: int = 20   # last N conversation turns kept in context
+    memory_short_term_limit: int = 6   # last N conversation turns kept in context
     memory_long_term_enabled: bool = True
 
     # ─── Web Search ───────────────────────────────────────────────────────────
@@ -133,6 +133,10 @@ class Settings(BaseSettings):
  
     # ─── Multi-Agent Orchestrator ───────────────────────────────────────   
     multi_agent_enabled: bool = False
+    
+    multi_agent_experimental: bool = False   # enables old 5-agent orchestrator
+    goal_tracking_enabled:    bool = True    # persist multi-step goals to DB
+    critic_enabled:           bool = True    # enable Critic layer in Coordinator
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

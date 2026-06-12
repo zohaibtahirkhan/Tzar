@@ -35,6 +35,7 @@ interface State {
   isStreaming: boolean;
   addMessage: (m: Message) => void;
   appendToken: (id: string, token: string) => void;
+  appendToolResults: (id: string, results: { tool: string; result: string; status: string }[]) => void;
   finaliseStream: (id: string) => void;
   clearChat: () => void;
   inputText: string;
@@ -99,6 +100,12 @@ export const useStore = create<State>((set) => ({
     set((s) => ({
       isStreaming: true,
       messages: s.messages.map((m) => m.id === id ? { ...m, content: m.content + token } : m),
+    })),
+  appendToolResults: (id, results) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id ? { ...m, toolResults: [...(m.toolResults ?? []), ...results] } : m
+      ),
     })),
   finaliseStream: (id) =>
     set((s) => ({

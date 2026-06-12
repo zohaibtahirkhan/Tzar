@@ -60,17 +60,19 @@ function Bubble({ msg }: { msg: Message }) {
 
 function useVoice(onTranscript: (t: string) => void) {
   const [listening, setListening] = useState(false);
-  const wsRef    = useRef<WebSocket | null>(null);
+  const wsRef     = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const ctxRef    = useRef<AudioContext | null>(null);   // track for cleanup
 
   const start = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const ctx = new AudioContext({ sampleRate: 16000 });
-      const src = ctx.createMediaStreamSource(stream);
+      ctxRef.current = ctx;
+      const src  = ctx.createMediaStreamSource(stream);
       const proc = ctx.createScriptProcessor(512, 1, 1);
-      const ws = new WebSocket("ws://127.0.0.1:8000/ws/audio");
+      const ws   = new WebSocket("ws://127.0.0.1:8000/ws/audio");
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
@@ -97,6 +99,8 @@ function useVoice(onTranscript: (t: string) => void) {
   const stop = useCallback(() => {
     wsRef.current?.close();
     streamRef.current?.getTracks().forEach(t => t.stop());
+    ctxRef.current?.close();   // prevent AudioContext leak
+    ctxRef.current = null;
     setListening(false);
   }, []);
 
@@ -108,11 +112,11 @@ function useVoice(onTranscript: (t: string) => void) {
 export function ChatPanel() {
   const {
     messages, isStreaming, inputText, setInputText,
-    addMessage, appendToken, finaliseStream, clearChat,
+    addMessage, appendToken, appendToolResults, finaliseStream, clearChat,
   } = useStore();
 
-  const bottomRef  = useRef<HTMLDivElement>(null);
-  const abortRef   = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef  = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -127,19 +131,19 @@ export function ChatPanel() {
     addMessage({ id: nextId(), role: "user", content: text.trim(), ts: Date.now() });
 
     const aId = nextId();
-    addMessage({ id: aId, role: "assistant", content: "", streaming: true, ts: Date.now() });
+    addMessage({ id: aId, role: "assistant", content: "", streaming: true, toolResults: [], ts: Date.now() });
 
     abortRef.current = streamChat(
       text.trim(),
-      (token) => appendToken(aId, token),
-      () => finaliseStream(aId),
-      (err) => { appendToken(aId, `\n\n[Error: ${err}]`); finaliseStream(aId); }
+      (token)   => appendToken(aId, token),
+      (results) => appendToolResults(aId, results),
+      ()        => finaliseStream(aId),
+      (err)     => { appendToken(aId, `\n\n[Error: ${err}]`); finaliseStream(aId); }
     );
-  }, [isStreaming, addMessage, appendToken, finaliseStream, setInputText]);
+  }, [isStreaming, addMessage, appendToken, appendToolResults, finaliseStream, setInputText]);
 
   const stopStream = () => {
     abortRef.current?.abort();
-    // finalise the last streaming message
     const last = [...messages].reverse().find(m => m.streaming);
     if (last) finaliseStream(last.id);
   };

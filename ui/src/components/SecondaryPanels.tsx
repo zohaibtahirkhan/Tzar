@@ -5,10 +5,10 @@
 import React, { useEffect, useState } from "react";
 import {
   Layers, RefreshCw, FolderOpen, Circle,
-  Wifi, WifiOff, Server, Settings, ChevronRight, Plus,
+  Wifi, WifiOff, Server, Settings, ChevronRight, Plus, Radio,
 } from "lucide-react";
 import { useStore } from "../stores/useStore";
-import { invokeTool, switchProject, setWebSearch, getHealth } from "../api";
+import { invokeTool, switchProject, setWebSearch, setMultiAgent, getHealth } from "../api";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Skills Panel
@@ -141,7 +141,14 @@ export function ProjectsPanel() {
       {showForm && (
         <form className="new-project-form" onSubmit={handleCreate}>
           <input className="search-input" value={newName} onChange={e => setNewName(e.target.value)} placeholder="Project name…" />
-          <input className="search-input" value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Description (optional)" style={{ marginTop: 6 }} />
+          <input
+            className="search-input"
+            value={newDesc}
+            onChange={e => setNewDesc(e.target.value)}
+            placeholder="Description (optional)"
+            style={{ marginTop: 6 }}
+            onKeyDown={e => e.key === "Enter" && e.preventDefault()}
+          />
           <button type="submit" className="btn-small" style={{ marginTop: 6 }} disabled={!newName.trim()}>Create</button>
         </form>
       )}
@@ -175,14 +182,16 @@ export function ProjectsPanel() {
 
 export function SettingsPanel() {
   const { health, setHealth, webSearchEnabled, setWebSearchEnabled, multiAgentEnabled, setMultiAgentEnabled } = useStore();
-  const [mcpStatus, setMcpStatus]   = useState("");
-  const [loading, setLoading]       = useState(false);
+  const [mcpStatus, setMcpStatus] = useState("");
+  const [loading, setLoading]     = useState(false);
 
   const loadAll = async () => {
     setLoading(true);
     try {
       const h = await getHealth();
-      setHealth(h); setWebSearchEnabled(h.web_search);
+      setHealth(h);
+      setWebSearchEnabled(h.web_search);
+      setMultiAgentEnabled(h.multi_agent);
       const mcp = await invokeTool("mcp_status");
       setMcpStatus(mcp.result ?? "");
     } catch { /* ignore */ } finally { setLoading(false); }
@@ -195,8 +204,16 @@ export function SettingsPanel() {
     setWebSearchEnabled(v);
   };
 
-  const dot = (val: string) => (
-    <span className="status-dot" style={{ background: val === "loaded" ? "var(--accent-green)" : "var(--accent-red)" }} />
+  const handleMultiAgent = async (v: boolean) => {
+    await setMultiAgent(v);
+    setMultiAgentEnabled(v);
+  };
+
+  const statusDot = (val: string, goodVal = "loaded") => (
+    <span
+      className="status-dot"
+      style={{ background: val === goodVal ? "var(--green)" : val === "failed" ? "var(--red)" : "var(--amber)" }}
+    />
   );
 
   return (
@@ -215,12 +232,13 @@ export function SettingsPanel() {
             {health ? (
               <div className="status-grid">
                 {[
-                  ["LLM",           health.llm],
-                  ["STT (Whisper)", health.stt],
-                  ["TTS (Kokoro)",  health.tts],
+                  ["LLM",            health.llm],
+                  ["STT (Whisper)",  health.stt],
+                  ["TTS (Kokoro)",   health.tts],
+                  ["Wake Word",      health.wake_word],
                 ].map(([label, val]) => (
                   <div key={label} className="status-row">
-                    {dot(val)}
+                    {statusDot(val)}
                     <span className="status-name">{label}</span>
                     <span className="status-val">{val}</span>
                   </div>
@@ -252,13 +270,13 @@ export function SettingsPanel() {
             <div className="toggle-row" style={{ marginTop: 10 }}>
               <div>
                 <div className="toggle-title">Multi-Agent Mode</div>
-                <div className="toggle-sub">parallel Planner / Researcher / Executor agents</div>
+                <div className="toggle-sub">Parallel Planner / Researcher / Executor agents</div>
               </div>
               <button
                 className={`toggle-pill ${multiAgentEnabled ? "toggle-on" : ""}`}
-                onClick={() => setMultiAgentEnabled(!multiAgentEnabled)}
+                onClick={() => handleMultiAgent(!multiAgentEnabled)}
               >
-                {multiAgentEnabled ? "On" : "Off"}
+                {multiAgentEnabled ? <><Radio size={12} /> On</> : "Off"}
               </button>
             </div>
           </div>

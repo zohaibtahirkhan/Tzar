@@ -14,6 +14,11 @@ RESPONSE FORMAT:
   }}
 }}
 
+CRITICAL: You MUST output ONLY a single JSON object. 
+Do NOT write "User:", "Assistant:", or any conversation turns.
+Do NOT continue the conversation history.
+STOP after the closing brace of your JSON response.
+
 SPEECH FIELD RULES — you must set these based on what you are saying:
 
 pace (float):

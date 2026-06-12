@@ -139,14 +139,22 @@ class ShortTermMemory:
         """Return messages in LLM-compatible format."""
         return [{"role": m["role"], "content": m["content"]} for m in self._buffer]
 
-    def format_for_prompt(self) -> str:
+    def format_for_prompt(self, max_chars: int = 1800) -> str:
+        """Return conversation history truncated to max_chars (rough token proxy)."""
         if not self._buffer:
             return "No prior conversation."
         lines = []
         for m in self._buffer:
             role = "User" if m["role"] == "user" else "Assistant"
-            lines.append(f"{role}: {m['content']}")
-        return "\n".join(lines)
+            # Truncate very long individual turns
+            content = m["content"][:400] + ("…" if len(m["content"]) > 400 else "")
+            lines.append(f"{role}: {content}")
+        result = "\n".join(lines)
+        # If still too long, keep only the most recent turns
+        if len(result) > max_chars:
+            result = result[-max_chars:]
+            result = result[result.find("\n") + 1:]  # don't start mid-line
+        return result
 
     def clear(self) -> None:
         self._buffer.clear()

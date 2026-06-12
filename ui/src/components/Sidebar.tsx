@@ -13,7 +13,6 @@ interface NavItem {
   id: Panel;
   label: string;
   icon: React.ReactNode;
-  badge?: string;
 }
 
 const NAV: NavItem[] = [
@@ -72,13 +71,6 @@ export function Sidebar() {
           </button>
         ))}
       </nav>
-
-      {/* Footer */}
-      {!sidebarCollapsed && (
-        <div className="sidebar-footer">
-          <span className="footer-arabic">حافظ</span>
-        </div>
-      )}
     </aside>
   );
 }

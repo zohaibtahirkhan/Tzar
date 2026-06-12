@@ -11,7 +11,9 @@ export interface HealthResponse {
   llm: string;
   stt: string;
   tts: string;
+  wake_word: string;
   web_search: boolean;
+  multi_agent: boolean;
   workspace: string;
 }
 
@@ -77,6 +79,7 @@ export const sendChat = (message: string) =>
 export function streamChat(
   message: string,
   onToken: (token: string) => void,
+  onToolResults: (results: ToolResult[]) => void,
   onDone: () => void,
   onError: (err: string) => void
 ): AbortController {
@@ -109,8 +112,9 @@ export function streamChat(
           if (data === "[DONE]") { onDone(); return; }
           try {
             const parsed = JSON.parse(data);
-            if (parsed.token) onToken(parsed.token);
-            if (parsed.error) onError(parsed.error);
+            if (parsed.token)        onToken(parsed.token);
+            if (parsed.tool_results) onToolResults(parsed.tool_results);
+            if (parsed.error)        onError(parsed.error);
           } catch { /* ignore */ }
         }
       }
@@ -151,6 +155,12 @@ export const invokeTool = (tool: string, params: Record<string, unknown> = {}) =
 
 export const setWebSearch = (enabled: boolean) =>
   apiFetch<{ web_search: boolean; status: string }>("/settings/web-search", {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+
+export const setMultiAgent = (enabled: boolean) =>
+  apiFetch<{ multi_agent: boolean; status: string }>("/settings/multi-agent", {
     method: "POST",
     body: JSON.stringify({ enabled }),
   });

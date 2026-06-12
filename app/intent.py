@@ -1,94 +1,110 @@
 """
-Intent Classifier
+Intent Classifier — Multi-Label Capabilities
 
-Replaces the binary needs_planning() heuristic with a proper
-5-way classification that routes each query to the right engine
-before any LLM is called.
+Replaces single-label IntentType with a Capabilities dataclass that
+independently sets flags for each required capability.
 
-Classification is purely rule-based (no LLM call) so it adds < 1 ms
-to every request.
+A single query can simultaneously need tools, memory, research, and planning —
+the old single-winner classification silently dropped those signals.
 
 Architecture:
     User text
         ↓
-    classify_intent()          ← this module
+    classify(user_text) → Capabilities
         ↓
-    CHAT     → direct LLM (no planner, no tools)
-    MEMORY   → hot_memory recall + direct LLM
-    TOOL     → tool router + LLM
-    RESEARCH → Research Agent
-    PLANNING → Planner LLM call → tool-executing LLM
+    caps.needs_research → Research Agent
+    caps.needs_planning → Planner
+    caps.needs_tools    → Tool Router
+    caps.needs_memory   → Memory recall
+    caps.needs_rag      → RAG / doc search
+    caps.is_complex()   → Multi-step orchestration
 
-Integration point:  app/pipeline.py  process_text_input()
-    Replace the single needs_planning() branch with:
-
-        intent = classify_intent(user_text)
-        if intent == IntentType.RESEARCH:
-            return await research_agent.run(user_text)
-        elif intent == IntentType.PLANNING:
-            plan = await make_plan(user_text, llm_engine.generate)
-            ...
-        else:
-            # CHAT / TOOL / MEMORY — skip planner entirely
-            ...
+Backward compat:
+    classify_intent(text) → IntentType  (shim, returns caps.primary as enum)
+    needs_planning(text)  → bool        (shim, unchanged signature)
 """
 from __future__ import annotations
 
 import re
 import time
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
 
 from loguru import logger
 
 
-# ─── Intent enum ─────────────────────────────────────────────────────────────
+# ─── Capabilities dataclass ───────────────────────────────────────────────────
+
+@dataclass
+class Capabilities:
+    needs_tools:    bool = False
+    needs_memory:   bool = False
+    needs_research: bool = False
+    needs_planning: bool = False
+    needs_rag:      bool = False   # local docs / notes / vault search
+
+    @property
+    def primary(self) -> str:
+        """Single-label summary for routing — most specific capability wins."""
+        if self.needs_planning:  return "planning"
+        if self.needs_research:  return "research"
+        if self.needs_rag:       return "rag"
+        if self.needs_tools:     return "tool"
+        if self.needs_memory:    return "memory"
+        return "chat"
+
+    def is_complex(self) -> bool:
+        """True when 2+ capabilities are needed — warrants orchestration."""
+        return sum([
+            self.needs_tools,
+            self.needs_memory,
+            self.needs_research,
+            self.needs_planning,
+            self.needs_rag,
+        ]) >= 2
+
+    def as_dict(self) -> dict:
+        return {
+            "needs_tools":    self.needs_tools,
+            "needs_memory":   self.needs_memory,
+            "needs_research": self.needs_research,
+            "needs_planning": self.needs_planning,
+            "needs_rag":      self.needs_rag,
+            "primary":        self.primary,
+            "is_complex":     self.is_complex(),
+        }
+
+
+# ─── Backward-compat enum (kept so existing isinstance checks still work) ─────
 
 class IntentType(Enum):
-    """
-    CHAT     — pure conversation, no tools needed
-               "what is 2+2"  /  "hello"  /  "explain transformers"
-    MEMORY   — reading or writing hot/cold memory or session history
-               "remember that I prefer urdu"  /  "what did I say about X"
-    TOOL     — single tool action, no planning needed
-               "create a note about RAG"  /  "search my notes for attention"
-    RESEARCH — multi-source web research + report generation
-               "research the latest llama.cpp updates"
-    PLANNING — complex multi-step task that needs the planner
-               "find the snowflake release, create a note, add to daily"
-    """
     CHAT     = "chat"
     MEMORY   = "memory"
     TOOL     = "tool"
     RESEARCH = "research"
     PLANNING = "planning"
+    RAG      = "rag"
 
 
 # ─── Signal tables ────────────────────────────────────────────────────────────
-
-# Matched in order — first match wins within each category.
 # Each entry: (pattern_or_substring, is_regex)
+# All compiled at module load — zero per-call overhead.
 
 _CHAT_SIGNALS: list[tuple[str, bool]] = [
-    # Greetings / pleasantries
     (r"^(hi|hello|hey|good morning|good evening|good night|morning|evening)[\s!,.]*$", True),
     (r"^(thanks|thank you|thx|ty|ok|okay|sure|yes|no|yep|nope|got it|cool|nice|great)[\s!,.]*$", True),
-    # Pure factual / definitional questions that need no tools
     (r"^what (is|are|was|were) ", True),
     (r"^who (is|was) ", True),
     (r"^(explain|describe|define|tell me about|how does|what does) ", True),
     (r"^(can you|could you|please) (explain|describe|tell me|clarify)", True),
-    # Math
     (r"^[\d\s\+\-\*\/\(\)\^\.]+[\?\s]*$", True),
     (r"what('s| is) \d", True),
-    # Meta / assistant questions
     ("what can you do", False),
     ("what are your capabilities", False),
     ("how are you", False),
 ]
 
 _MEMORY_SIGNALS: list[tuple[str, bool]] = [
-    # Reading memory
     ("what do you know about me", False),
     ("what did i say", False),
     ("do you remember", False),
@@ -98,7 +114,6 @@ _MEMORY_SIGNALS: list[tuple[str, bool]] = [
     ("search my sessions", False),
     ("past conversation", False),
     ("session history", False),
-    # Writing memory
     ("remember that", False),
     ("remember this", False),
     ("save to memory", False),
@@ -107,33 +122,54 @@ _MEMORY_SIGNALS: list[tuple[str, bool]] = [
     ("update my profile", False),
     ("i prefer", False),
     ("my name is", False),
-    ("what have i learned about", False),   # → kg_expand
-    ("what do i know about", False),        # → kg_expand
+    ("what have i learned about", False),
+    ("what do i know about", False),
     ("what are my projects", False),
     ("what projects", False),
 ]
 
 _RESEARCH_SIGNALS: list[tuple[str, bool]] = [
-    # Explicit research intent
     ("research ", False),
     ("investigate ", False),
     ("look into ", False),
     ("find out about ", False),
     ("deep dive into", False),
-    # Multi-source comparison / analysis of external topics
     (r"compare .{3,} (vs|versus|and) .{3,}", True),
     (r"what('s| is| are) the latest ", True),
     (r"what('s| is) new (in|with|about) ", True),
     ("recent updates to", False),
     ("latest news about", False),
     ("how does .* compare", False),
-    # Research + document combos
-    ("research .* and (create|write|save|document)", False),
-    ("find .* and (summarize|summarise|write a report)", False),
+]
+
+_RAG_SIGNALS: list[tuple[str, bool]] = [
+    ("what did the", False),           # "what did the contract say about..."
+    ("what does the", False),          # "what does the spec say..."
+    ("according to my", False),
+    ("search my documents", False),
+    ("search documents", False),
+    ("search local files", False),
+    ("what documents", False),
+    ("list documents", False),
+    ("ingest document", False),
+    ("ingest this", False),
+    ("add this document", False),
+    (r"\b(previous|last|earlier|prior)\s+(version|draft|doc|document|note|contract|report)", True),
+    ("read my", False),                # "read my contract", "read my notes"
+    ("compare it to", False),
+    ("compare to the previous", False),
+    ("compare with the last", False),
+    ("from the document", False),
+    ("in the document", False),
+    ("from my notes", False),
+    ("in my notes", False),
+    ("search the vault", False),
+    ("search my notes", False),
+    ("search notes", False),
+    ("unified search", False),
 ]
 
 _TOOL_SIGNALS: list[tuple[str, bool]] = [
-    # Obsidian note operations
     ("create a note", False),
     ("create note", False),
     ("write a note", False),
@@ -142,16 +178,11 @@ _TOOL_SIGNALS: list[tuple[str, bool]] = [
     ("add to daily", False),
     ("log this", False),
     ("log to daily", False),
-    ("search my notes", False),
-    ("search notes", False),
-    ("search the vault", False),
     ("read note", False),
     ("open note", False),
     ("list my notes", False),
     ("list vault", False),
     ("morning briefing", False),
-    ("good morning", False),
-    # File operations
     ("read the file", False),
     ("read file", False),
     ("write to file", False),
@@ -159,30 +190,17 @@ _TOOL_SIGNALS: list[tuple[str, bool]] = [
     ("list files", False),
     ("list directory", False),
     ("show me the files", False),
-    # Knowledge graph
     ("knowledge graph", False),
     ("graph stats", False),
-    ("how does .* connect", False),
     ("find the path", False),
     ("graph clusters", False),
-    # Web search (single)
     ("search the web for", False),
     ("search online for", False),
     ("google ", False),
     ("look up ", False),
-    # Skills
     ("load skill", False),
     ("save this skill", False),
     ("create a skill", False),
-    ("ingest document", False),
-    ("ingest this", False),
-    ("add this document", False),
-    ("search my documents", False),
-    ("search documents", False),
-    ("search local files", False),
-    ("what documents", False),
-    ("list documents", False),
-    ("what did the", False),           # doc_search trigger: "what did the contract say..."
     ("graph expand", False),
     ("semantic expand", False),
     ("mcp status", False),
@@ -203,24 +221,30 @@ _TOOL_SIGNALS: list[tuple[str, bool]] = [
     ("what model", False),
     ("suggest a model", False),
     ("recommend a model", False),
-    ("what can my", False),
     ("hardware profile", False),
     ("check my system", False),
     ("analyse my hardware", False),
     ("analyze my hardware", False),
     ("is my computer good enough", False),
+    # Browser / computer use
+    ("open browser", False),
+    ("go to", False),
+    ("click on", False),
+    ("fill in", False),
+    ("browse to", False),
+    ("navigate to", False),
+    ("use the browser", False),
+    ("use browser", False),
 ]
 
 _PLANNING_SIGNALS: list[tuple[str, bool]] = [
-    # Explicit sequencing language
     (" then ", False),
     (" after that", False),
     (" and then ", False),
     (" and also ", False),
     (" followed by ", False),
-    # "X and Y" where both X and Y are actions (two verbs joined by "and")
-    (r"\b(create|write|find|search|read|save|add|log|build|analyze|organize|organise)\b.{3,30}\band\b.{3,30}\b(create|write|add|save|link|log|update|search|note|graph|daily|append)\b", True),
-    # Organisational complexity
+    # Two action verbs joined by "and"
+    (r"\b(create|write|find|search|read|save|add|log|build|analyze|organize|organise|compare|summarize|summarise|ingest)\b.{3,40}\band\b.{3,40}\b(create|write|add|save|link|log|update|search|note|graph|daily|append|compare|summarize|ingest)\b", True),
     ("set up ", False),
     ("organize ", False),
     ("organise ", False),
@@ -229,41 +253,34 @@ _PLANNING_SIGNALS: list[tuple[str, bool]] = [
     ("summarize all", False),
     ("summarise all", False),
     ("for each ", False),
-    ("every ", False),
-    ("all the ", False),
-    # Compound tasks
     ("figure out ", False),
-    ("analyze and ", False),
-    ("analyse and ", False),
-    ("continue ", False),       # "continue the X project"
-    ("resume ", False),         # "resume work on X"
-    ("switch to ", False),      # "switch to X project"
-    ("work on ", False),        # "work on X"
-    ("analyse my ", False),      # ← ADD: "Analyse my recent notes and find gaps"
-    ("analyze my ", False),      # ← ADD: covers American spelling too
-    ("write a summary", False),  # ← ADD: "Write a summary of my X project"
-    ("write a report", False), 
+    ("analyse my ", False),
+    ("analyze my ", False),
+    ("write a summary", False),
+    ("write a report", False),
+    ("continue ", False),
+    ("resume ", False),
+    ("work on ", False),
 ]
 
 
-# ─── Classifier ───────────────────────────────────────────────────────────────
-def _compile_signals(raw_signals: list[tuple[str, bool]]) -> list[tuple[object, bool]]:
-    compiled = []
-    for pattern, is_regex in raw_signals:
-        if is_regex:
-            compiled.append((re.compile(pattern), True))
-        else:
-            compiled.append((pattern, False))
-    return compiled
+# ─── Compile all signals at module load ──────────────────────────────────────
 
-_CHAT_SIGNALS = _compile_signals(_CHAT_SIGNALS)
-_MEMORY_SIGNALS = _compile_signals(_MEMORY_SIGNALS)
-_RESEARCH_SIGNALS = _compile_signals(_RESEARCH_SIGNALS)
-_TOOL_SIGNALS = _compile_signals(_TOOL_SIGNALS)
-_PLANNING_SIGNALS = _compile_signals(_PLANNING_SIGNALS)
+def _compile(raw: list[tuple[str, bool]]) -> list[tuple[object, bool]]:
+    return [
+        (re.compile(p) if is_re else p, is_re)
+        for p, is_re in raw
+    ]
 
-def _matches(text: str, signals: list[tuple[str, bool]]) -> bool:
-    """Return True if any signal matches the lowercased text."""
+_CHAT_COMPILED     = _compile(_CHAT_SIGNALS)
+_MEMORY_COMPILED   = _compile(_MEMORY_SIGNALS)
+_RESEARCH_COMPILED = _compile(_RESEARCH_SIGNALS)
+_RAG_COMPILED      = _compile(_RAG_SIGNALS)
+_TOOL_COMPILED     = _compile(_TOOL_SIGNALS)
+_PLANNING_COMPILED = _compile(_PLANNING_SIGNALS)
+
+
+def _matches(text: str, signals: list) -> bool:
     lower = text.lower().strip()
     for pattern, is_regex in signals:
         if is_regex:
@@ -275,80 +292,95 @@ def _matches(text: str, signals: list[tuple[str, bool]]) -> bool:
     return False
 
 
-def classify_intent(user_text: str) -> IntentType:
-    """
-    Classify the user's intent without calling the LLM.
-    Returns an IntentType enum value.
+# ─── Cross-signal boosters ────────────────────────────────────────────────────
+# Patterns that imply COMBINATIONS of capabilities when they appear.
+# Each entry: (pattern, is_regex, flags_to_set)
 
-    Ordering matters — more specific checks win over general ones.
+_CROSS_SIGNALS: list[tuple[str, bool, dict]] = [
+    # "read my X and compare to previous" → RAG + planning
+    (r"\bread\b.{3,30}\b(compare|versus|vs)\b", True,
+     {"needs_rag": True, "needs_planning": True}),
 
-    Priority (highest → lowest):
-        RESEARCH  > PLANNING  > MEMORY  > TOOL  > CHAT
+    # "read X, summarize, create note" → RAG + planning + tools
+    (r"\b(read|summarize|summarise)\b.{3,30}\b(create|save|write)\b", True,
+     {"needs_rag": True, "needs_planning": True, "needs_tools": True}),
+
+    # "research X and save" → research + tools
+    (r"\bresearch\b.{3,50}\b(save|create|note|write|add)\b", True,
+     {"needs_research": True, "needs_tools": True}),
+
+    # "remember [anything about a doc/note]" → memory + RAG
+    ("remember what the", False, {"needs_memory": True, "needs_rag": True}),
+
+    # "find and summarize" → research or RAG + planning
+    (r"\b(find|search)\b.{3,30}\bsummar", True,
+     {"needs_planning": True}),
+]
+
+_CROSS_COMPILED = [
+    (re.compile(p) if is_re else p, is_re, flags)
+    for p, is_re, flags in _CROSS_SIGNALS
+]
+
+
+# ─── Public classifier ────────────────────────────────────────────────────────
+
+def classify(user_text: str) -> Capabilities:
     """
-    t0 = time.perf_counter()
+    Multi-label classification. Each signal set fires independently.
+    Returns a Capabilities object with all matching flags set.
+    """
+    t0   = time.perf_counter()
     text = user_text.strip()
     lower = text.lower()
+    caps  = Capabilities()
 
-    # ── Very short inputs → CHAT immediately ──────────────────────────────
+    # Very short inputs are always CHAT
     if len(lower.split()) <= 3:
-        result = IntentType.CHAT
-        _log(result, user_text, t0)
-        return result
+        _log(caps, user_text, t0)
+        return caps
 
-    # ── RESEARCH — highest specificity, check first ───────────────────────
-    if _matches(text, _RESEARCH_SIGNALS):
-        result = IntentType.RESEARCH
-        _log(result, user_text, t0)
-        return result
+    # ── Independent flag setting — ALL can fire ───────────────────────────────
+    if _matches(text, _RESEARCH_COMPILED):  caps.needs_research = True
+    if _matches(text, _PLANNING_COMPILED):  caps.needs_planning = True
+    if _matches(text, _MEMORY_COMPILED):    caps.needs_memory   = True
+    if _matches(text, _TOOL_COMPILED):      caps.needs_tools    = True
+    if _matches(text, _RAG_COMPILED):       caps.needs_rag      = True
 
-    # ── PLANNING — multi-step sequences (before TOOL — compound actions win) ─
-    if _matches(text, _PLANNING_SIGNALS):
-        result = IntentType.PLANNING
-        _log(result, user_text, t0)
-        return result
+    # ── Cross-signal boosting — compound patterns set multiple flags ──────────
+    for pattern, is_re, flags in _CROSS_COMPILED:
+        hit = re.search(pattern, lower) if is_re else (pattern in lower)
+        if hit:
+            for k, v in flags.items():
+                setattr(caps, k, v)
 
-    # ── MEMORY — reading or writing personal memory ───────────────────────
-    if _matches(text, _MEMORY_SIGNALS):
-        result = IntentType.MEMORY
-        _log(result, user_text, t0)
-        return result
-
-    # ── TOOL — single well-defined tool action ────────────────────────────
-    if _matches(text, _TOOL_SIGNALS):
-        result = IntentType.TOOL
-        _log(result, user_text, t0)
-        return result
-
-    # ── CHAT — pure conversation signal or fallback ───────────────────────
-    if _matches(text, _CHAT_SIGNALS):
-        result = IntentType.CHAT
-        _log(result, user_text, t0)
-        return result
-
-    # ── Default: CHAT (safest fallback — won't spin up planner) ──────────
-    result = IntentType.CHAT
-    _log(result, user_text, t0, fallback=True)
-    return result
+    _log(caps, user_text, t0)
+    return caps
 
 
-def _log(result: IntentType, text: str, t0: float, fallback: bool = False) -> None:
+def _log(caps: Capabilities, text: str, t0: float) -> None:
     elapsed_us = (time.perf_counter() - t0) * 1_000_000
-    label = f"{result.value.upper()}" + (" [fallback]" if fallback else "")
-    logger.debug(
-        "Intent: {} ({:.0f}µs) — '{}'",
-        label,
-        elapsed_us,
-        text[:60],
-    )
+    flags = [k for k, v in caps.as_dict().items() if isinstance(v, bool) and v]
+    label = caps.primary.upper() + (f" [{', '.join(flags)}]" if flags else "")
+    logger.debug("Caps: {} ({:.0f}µs) — '{}'", label, elapsed_us, text[:60])
 
 
-# ─── Backward-compat shim ────────────────────────────────────────────────────
+# ─── Backward-compat shims ────────────────────────────────────────────────────
+
+def classify_intent(user_text: str) -> "IntentType":
+    """
+    Drop-in for old classify_intent(). Returns IntentType enum.
+    Pipeline code that does `intent == IntentType.PLANNING` still works.
+    """
+    caps = classify(user_text)
+    primary = caps.primary
+    try:
+        return IntentType(primary)
+    except ValueError:
+        return IntentType.CHAT
+
 
 def needs_planning(user_text: str) -> bool:
-    """
-    Drop-in replacement for the old planner.needs_planning().
-    Returns True for PLANNING and RESEARCH intents.
-    Keeps existing code working while we wire in the new classifier.
-    """
-    intent = classify_intent(user_text)
-    return intent in (IntentType.PLANNING, IntentType.RESEARCH)
+    """Drop-in for old planner.needs_planning()."""
+    caps = classify(user_text)
+    return caps.needs_planning or caps.needs_research
