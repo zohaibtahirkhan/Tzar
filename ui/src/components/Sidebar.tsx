@@ -5,7 +5,7 @@ import React from "react";
 import {
   MessageSquare, Brain, GitBranch, Layers,
   FolderOpen, Settings, ChevronLeft, ChevronRight,
-  Circle, FileText, Cpu,
+  Circle, FileText, Cpu, FlaskConical
 } from "lucide-react";
 import { useStore, type Panel } from "../stores/useStore";
 
@@ -24,6 +24,7 @@ const NAV: NavItem[] = [
   { id: "projects", label: "Projects",  icon: <FolderOpen size={17} /> },
   { id: "system",   label: "System",    icon: <Cpu size={17} /> },
   { id: "settings", label: "Settings",  icon: <Settings size={17} /> },
+  { id: "tests", label: "Test Runner", icon: <FlaskConical size={17} /> },
 ];
 
 export function Sidebar() {

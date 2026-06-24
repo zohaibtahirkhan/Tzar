@@ -8,6 +8,8 @@ venv/
 models/*.gguf
 data/logs/
 data/cache/
+AssistantWorkspace/*
+.pytest_cache
 
 # UI
 node_modules/

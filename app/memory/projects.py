@@ -50,7 +50,6 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from loguru import logger
@@ -112,10 +111,10 @@ class ProjectContext:
 
     def to_context_string(self) -> str:
         """Format as system-prompt context block."""
-        parts = [
-            f"ACTIVE PROJECT: {self.name}",
-            f"Description: {self.description}" if self.description else "",
-        ]
+        parts = [f"ACTIVE PROJECT: {self.name}"]
+        
+        if self.description:
+            parts.append(f"Description: {self.description}")
 
         if self.open_tasks:
             parts.append(f"\nOpen tasks ({len(self.open_tasks)}):")
@@ -136,15 +135,16 @@ class ProjectContext:
             parts.append(f"\nKnown concepts: {', '.join(self.graph_entities[:15])}")
 
         parts.append(f"\n(Project context loaded at {self.loaded_at})")
-        return "\n".join(p for p in parts if p)
+        return "\n".join(parts)
 
     def to_spoken_summary(self) -> str:
         """Short spoken confirmation for TTS."""
         task_str  = f"{len(self.open_tasks)} open tasks" if self.open_tasks else "no open tasks"
         note_str  = f"{len(self.notes)} notes" if self.notes else "no notes"
+        mem_str   = f"{len(self.memories)} related memories" if self.memories else "no related memories"
         return (
             f"Switched to project {self.name}. "
-            f"I've loaded {note_str} and {task_str}. "
+            f"I've loaded {note_str}, {task_str}, and {mem_str}. "
             f"What would you like to do?"
         )
 
@@ -181,11 +181,11 @@ async def project_new(
                 (name, slug, description, vault_folder, tags),
             )
             conn.commit()
-            conn.close()
             return f"Project '{name}' created (vault: Projects/{vault_folder})."
         except sqlite3.IntegrityError:
-            conn.close()
             return f"Project '{name}' already exists."
+        finally:
+            conn.close()
 
     return await loop.run_in_executor(None, _create)
 
@@ -196,11 +196,12 @@ async def project_list() -> str:
 
     def _list():
         conn = _get_db()
-        rows = conn.execute(
-            "SELECT name, status, description, last_opened FROM projects ORDER BY last_opened DESC NULLS LAST"
-        ).fetchall()
-        conn.close()
-        return rows
+        try:
+            return conn.execute(
+                "SELECT name, status, description, last_opened FROM projects ORDER BY last_opened DESC NULLS LAST"
+            ).fetchall()
+        finally:
+            conn.close()
 
     rows = await loop.run_in_executor(None, _list)
 
@@ -231,24 +232,39 @@ async def project_update(
 
     def _update():
         conn = _get_db()
-        if description is not None:
-            conn.execute("UPDATE projects SET description=? WHERE slug=?", (description, slug))
-        if status is not None:
-            conn.execute("UPDATE projects SET status=? WHERE slug=?", (status, slug))
-        conn.commit()
-        rows = conn.execute("SELECT changes()").fetchone()[0]
-        conn.close()
-        return rows
+        try:
+            exists = conn.execute("SELECT 1 FROM projects WHERE slug=?", (slug,)).fetchone()
+            if not exists:
+                return 0
+            
+            if description is not None:
+                conn.execute("UPDATE projects SET description=? WHERE slug=?", (description, slug))
+            if status is not None:
+                conn.execute("UPDATE projects SET status=? WHERE slug=?", (status, slug))
+            conn.commit()
+            return 1
+        finally:
+            conn.close()
 
     changed = await loop.run_in_executor(None, _update)
+    
     if changed:
+        # Refresh active context if the currently active project was updated
+        if _active_project and _active_project.slug == slug:
+            if description is not None:
+                _active_project.description = description
         return f"Project '{name}' updated."
+        
     return f"Project '{name}' not found."
 
 
 async def project_archive(name: str) -> str:
     """Mark a project as archived."""
-    return await project_update(name, status="archived")
+    result = await project_update(name, status="archived")
+    if "updated" in result and _active_project and _slugify(name) == _active_project.slug:
+        clear_active_project()
+        return f"{result} Active project cleared."
+    return result
 
 
 async def project_status() -> str:
@@ -276,29 +292,25 @@ async def project_switch(name: str) -> str:
 
     def _find():
         conn = _get_db()
-        row = conn.execute(
-            "SELECT * FROM projects WHERE slug=? OR name LIKE ?",
-            (slug, f"%{name}%"),
-        ).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE projects SET last_opened=datetime('now') WHERE id=?",
-                (row["id"],)
-            )
-            conn.commit()
-        conn.close()
-        return dict(row) if row else None
+        try:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE slug=? OR name LIKE ?",
+                (slug, f"%{name}%"),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE projects SET last_opened=datetime('now') WHERE id=?",
+                    (row["id"],)
+                )
+                conn.commit()
+            return dict(row) if row else None
+        finally:
+            conn.close()
 
     proj_row = await loop.run_in_executor(None, _find)
 
     if not proj_row:
-        # Auto-create if not found
-        logger.info("Project '{}' not found — auto-creating", name)
-        await project_new(name, vault_folder=slug)
-        proj_row = {
-            "name": name, "slug": slug, "description": "",
-            "vault_folder": slug, "memory_tags": "[]",
-        }
+        return f"I don't have a project called '{name}'. Would you like me to create one?"
 
     ctx = ProjectContext(
         name         = proj_row["name"],
@@ -335,6 +347,9 @@ async def _load_notes(ctx: ProjectContext) -> None:
         notes = []
         open_tasks = []
 
+        if not blocks or len(blocks) < 3:
+            logger.warning("No notes parsed from vault folder '{}'", ctx.vault_folder)
+
         for i in range(1, len(blocks) - 1, 2):
             title   = blocks[i].strip()
             content = blocks[i + 1].strip()
@@ -364,10 +379,12 @@ async def _load_memories(ctx: ProjectContext, tags_json: str) -> None:
     """Load memories tagged with this project or matching its name."""
     try:
         from app.tools.obsidian import obsidian_semantic_search
-        from app.memory.scoring import rank_memories_by_score
 
+        tags = json.loads(tags_json) if tags_json else []
+        query = f"{ctx.name} {' '.join(tags)}".strip()
+        
         # Semantic search for project-related notes
-        result = await obsidian_semantic_search(ctx.name, top_k=5)
+        result = await obsidian_semantic_search(query, top_k=5)
         lines  = [
             l for l in result.splitlines()
             if l.strip() and not l.startswith("Semantically")
@@ -384,6 +401,10 @@ async def _load_graph_entities(ctx: ProjectContext) -> None:
         from app.tools.knowledge_graph import kg_get_neighbors
         result = await kg_get_neighbors(ctx.name, depth=1)
         entities = re.findall(r"→ (.+?) \(", result)
+        
+        if not entities:
+            logger.debug("No KG entities parsed for project '{}'", ctx.name)
+            
         ctx.graph_entities = entities[:20]
     except Exception as e:
         logger.debug("Could not load KG entities for project: {}", e)
@@ -420,32 +441,41 @@ def clear_active_project() -> str:
 
 # ─── Intent detection helper ─────────────────────────────────────────────────
 
-_CONTINUE_PATTERNS = re.compile(
-    r"\b(continue|resume|switch to|load|open|work on|go back to|pick up)\b"
-    r".{1,30}\b(project|work|task)?\b",
+_PROJECT_NAME_PATTERN = re.compile(
+    r"\b(switch to|load|open|resume|continue|work on)\s+"
+    r"(?:the\s+)?(.+?)(?:\s+project)?\s*[.!]?\s*$",
     re.IGNORECASE,
 )
 
-_PROJECT_NAME_PATTERN = re.compile(
-    r"\b(continue|resume|switch to|load|open|work on)\s+(?:the\s+)?(.+?)(?:\s+project)?\s*$",
+# Fast-reject: queries starting with these verbs are NEVER project switches
+_NON_PROJECT_PREFIX = re.compile(
+    r"^(search|find|look|list|show|get|fetch|read|write|create|add|enable|disable|"
+    r"what|who|when|where|how|why|tell|give|check|open browser|navigate|go to|"
+    r"extract|capture|append|delete|remove|ingest)\b",
     re.IGNORECASE,
 )
 
 
 def extract_project_name_from_query(text: str) -> Optional[str]:
     """
-    Try to extract a project name from a switch/continue query.
-    Returns the project name string, or None.
+    Extract a project name only from explicit project-management commands.
+    Returns None for all other queries including searches.
 
     Examples:
         "continue the AI assistant project" → "AI assistant"
         "switch to workers welfare" → "workers welfare"
-        "resume Databricks work" → "Databricks"
+        "resume Databricks work" → "Databricks work"
     """
-    m = _PROJECT_NAME_PATTERN.search(text.strip())
+    stripped = text.strip()
+
+    # Fast reject to avoid matching "search for...", "find...", etc.
+    if _NON_PROJECT_PREFIX.match(stripped):
+        return None
+
+    m = _PROJECT_NAME_PATTERN.search(stripped)
     if m:
-        candidate = m.group(2).strip()
+        candidate = m.group(2).strip().rstrip('.!').strip()
         # Filter out obviously wrong matches
-        if len(candidate) > 2 and candidate.lower() not in ("my", "the", "a", "an"):
+        if len(candidate) > 2 and candidate.lower() not in ("my", "the", "a", "an", "it", "this", "that"):
             return candidate
     return None

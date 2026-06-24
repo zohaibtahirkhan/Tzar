@@ -42,7 +42,7 @@ def _ensure_files() -> None:
         )
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _read_entries(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
@@ -94,7 +94,7 @@ def hot_memory_add(target: str, content: str) -> str:
 
     entries.append(content.strip())
     _write_entries(path, entries)
-    
+
     memory_id = _get_memory_id(content)
     score_memory(memory_id=memory_id, content=content)
     used = _char_count(entries)
@@ -193,23 +193,31 @@ def hot_memory_for_prompt() -> str:
         entries = _read_entries(path)
         if not entries:
             continue
-        
+
         # Generate IDs for all current entries
         entry_ids = [_get_memory_id(e) for e in entries]
-        
+
         # Update access frequency
         for mid in entry_ids:
             on_memory_recalled(mid)
 
         # Sort by composite score (highest relevance first)
-        ranked_ids = rank_memories_by_score(entry_ids)
-        
+        ranked = rank_memories_by_score(entry_ids)
+
         # Create a map for sorting
         id_to_entry = {_get_memory_id(e): e for e in entries}
-        
-        # Reorder entries based on rank
-        sorted_entries = [id_to_entry[mid] for _, mid in ranked_ids if mid in id_to_entry]
-        
+
+        # ranked is list[tuple[float, str]] — unpack score and id
+        sorted_entries = [
+            id_to_entry[mid]
+            for _score, mid in ranked
+            if mid in id_to_entry
+        ]
+
+        # If ranking returned nothing useful, fall back to original order
+        if not sorted_entries:
+            sorted_entries = entries
+
         used = _char_count(sorted_entries)
         pct  = int(used / limit * 100)
         body = "\n§\n".join(sorted_entries)

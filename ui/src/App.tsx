@@ -9,6 +9,7 @@ import { GraphPanel } from "./components/GraphPanel";
 import { DocsPanel } from "./components/DocsPanel";
 import { SystemPanel } from "./components/SystemPanel";
 import { SkillsPanel, ProjectsPanel, SettingsPanel } from "./components/SecondaryPanels";
+import { TestPanel } from "./components/TestPanel";
 import { useStore } from "./stores/useStore";
 import { getHealth } from "./api";
 
@@ -40,6 +41,7 @@ export default function App() {
         {activePanel === "projects" && <ProjectsPanel />}
         {activePanel === "system"   && <SystemPanel />}
         {activePanel === "settings" && <SettingsPanel />}
+        {activePanel === "tests" && <TestPanel />}
       </main>
     </div>
   );

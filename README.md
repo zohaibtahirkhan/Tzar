@@ -453,7 +453,7 @@ LLM_BACKEND=ollama                      # ollama | llamacpp
 LLM_MODEL=qwen2.5:7b                    # Ollama model tag
 LLM_MODEL_PATH=models/qwen2.5-7b.gguf  # llama.cpp path (if backend=llamacpp)
 LLM_N_GPU_LAYERS=0                      # 0=CPU only, -1=all GPU, N=partial
-LLM_CONTEXT_LENGTH=4096
+LLM_CONTEXT_LENGTH=8192
 LLM_THREADS=6
 LLM_TEMPERATURE=0.7
 LLM_OLLAMA_HOST=http://localhost:11434

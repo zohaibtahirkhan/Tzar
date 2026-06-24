@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import type { Memory, HealthResponse, RagDoc } from "../api";
 
-export type Panel = "chat" | "memory" | "graph" | "skills" | "projects" | "docs" | "system" | "settings";
+export type Panel = "chat" | "memory" | "graph" | "skills" | "projects" | "docs" | "system" | "settings" | "tests";
 
 export interface Message {
   id: string;

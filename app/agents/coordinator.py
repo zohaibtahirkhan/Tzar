@@ -153,17 +153,18 @@ class Critic:
 
         try:
             from app.llm.engine import llm_engine
-            raw = await asyncio.wait_for(
-                llm_engine.generate(
-                    [{"role": "user", "content": _CRITIC_PROMPT.format(
-                        request=request,
-                        action=step.description,
-                        result=result.result[:600],
-                    )}],
-                    system_prompt="Return only valid JSON. Be strict but fair.",
-                ),
+            raw = await llm_engine.generate_safe(
+                [{"role": "user", "content": _CRITIC_PROMPT.format(
+                    request=request,
+                    action=step.description,
+                    result=result.result[:600],
+                )}],
+                system_prompt="Return only valid JSON. Be strict but fair.",
                 timeout=15.0,
             )
+            if not raw:
+                return CriticResult(satisfied=True, reason="Critic returned empty — assuming ok.")
+            
             clean = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
             m     = re.search(r"\{.*\}", clean, re.DOTALL)
             if m:
@@ -187,67 +188,146 @@ critic = Critic()
 
 _PLAN_PROMPT = """\
 You are a task planner for a local voice assistant.
-Given a user request and the capabilities needed, produce an execution plan.
-
-Respond ONLY in JSON — no prose.
-
-{{
+Produce a minimal execution plan for the user request.
+ 
+Respond ONLY in JSON — no prose, no markdown fences.
+ 
+{
   "goal": "one sentence describing the end goal",
   "steps": [
-    {{"description": "what this step does", "tool": "tool_name", "params": {{}}, "required": true}},
-    ...
+    {"description": "what this step does", "tool": "tool_name", "params": {"param_name": "value"}, "required": true}
   ]
-}}
-
-Available tools (use EXACT names):
-  read_file, write_file, append_file, list_directory, delete_file,
-  web_search, save_memory, recall_memory, memory_write, memory_remove,
-  obsidian_create_note, obsidian_append_daily, obsidian_capture_idea,
-  obsidian_search, obsidian_keyword_search, obsidian_read_note, obsidian_list_vault,
-  obsidian_morning_briefing, obsidian_get_related, obsidian_get_project, obsidian_reindex,
-  kg_summary, kg_path, kg_neighbors, kg_clusters, kg_add, kg_extract_and_index,
-  doc_search, ingest_document, ingest_directory, remove_document, list_documents,
-  unified_search, skill_load, skill_create, session_search,
-  memory_scores, memory_prune, project_list, project_switch,
-  system_profile, mcp_status,
-  browser_action
-
+}
+ 
+TOOL REFERENCE — always include the params shown:
+ 
+  obsidian_search          params: {"query": "<search terms>"}
+  obsidian_keyword_search  params: {"query": "<keyword>"}
+  obsidian_read_note       params: {"title": "<note title>"}
+  obsidian_create_note     params: {"title": "<title>", "content": "<body>"}
+  obsidian_append_daily    params: {"content": "<text to append>"}
+  obsidian_capture_idea    params: {"content": "<idea text>"}
+  obsidian_list_vault      params: {}
+  obsidian_morning_briefing params: {}
+  obsidian_get_related     params: {"title": "<note title>"}
+ 
+  web_search               params: {"query": "<search query>"}
+ 
+  doc_search               params: {"query": "<search terms>"}
+  unified_search           params: {"query": "<search terms>"}
+  ingest_document          params: {"path": "<file path>"}
+  list_documents           params: {}
+ 
+  kg_summary               params: {}
+  kg_add                   params: {"text": "<triples text>"}
+  kg_extract_and_index     params: {"text": "<raw text>", "note_title": "<title>"}
+  kg_path                  params: {"source": "<node>", "target": "<node>"}
+  kg_neighbors             params: {"node": "<node name>", "depth": 1}
+  kg_clusters              params: {}
+ 
+  read_file                params: {"path": "<file path>"}
+  write_file               params: {"path": "<file path>", "content": "<text>"}
+  append_file              params: {"path": "<file path>", "content": "<text>"}
+  list_directory           params: {"path": "<directory path>"}
+  delete_file              params: {"path": "<file path>"}
+ 
+  save_memory              params: {"category": "<category>", "content": "<fact>"}
+  recall_memory            params: {"query": "<search terms>"}
+ 
+  project_list             params: {}
+  project_switch           params: {"name": "<project name>"}
+  system_profile           params: {}
+  memory_scores            params: {}
+  memory_prune             params: {}
+  mcp_status               params: {}
+  browser_action           params: {"task": "<what to do in browser>"}
+ 
 Capabilities needed: {caps}
 Request: {request}
-
+ 
 Rules:
-- Keep steps minimal (2–5 is usually right).
-- research steps that need web search: use web_search tool.
-- For RAG / local document lookups: use doc_search or unified_search.
-- params should only include fields relevant to the tool.
-- required: false for optional/enrichment steps.
+- Use EXACT tool names from the reference above.
+- ALWAYS include ALL required params — never use empty {{}} for tools that need a query.
+- Keep steps to 2–5. Single-tool tasks need exactly 1 step.
+- For note searches: use obsidian_search with the search terms as query.
+- For document/memory searches: use unified_search with the search terms as query.
+- required: false only for optional enrichment steps.
 """
 
-
-async def _build_plan(ctx: CoordinatorContext) -> list[ToolStep]:
-    """Ask the LLM to produce an ordered list of ToolSteps."""
+def _parse_plan_json(raw: str) -> dict | None:
+    """
+    Robust JSON parser for LLM plan output.
+    Handles four failure modes Qwen 2.5 3B produces:
+      1. Normal: {"goal": ..., "steps": [...]}
+      2. No outer braces: just the interior  ← actual failure in logs
+      3. Markdown fenced: ```json ... ```
+      4. Truncated: hit max_tokens mid-object
+    """
+    if not raw or not raw.strip():
+        return None
+ 
+    # Strip markdown fences
+    clean = re.sub(r'```[a-zA-Z]*\n?|```', '', raw.strip()).strip()
+ 
+    # 1. Starts with { — use outermost braces
+    if clean.startswith('{'):
+        end = clean.rfind('}')
+        if end != -1:
+            try:
+                return json.loads(clean[:end + 1])
+            except json.JSONDecodeError:
+                pass
+ 
+    # 2. Interior without outer braces — wrap and try
+    try:
+        return json.loads('{' + clean + '}')
+    except json.JSONDecodeError:
+        pass
+ 
+    # 3. Extract steps array directly as last resort
+    m = re.search(r'"steps"\s*:\s*(\[.*?\])', clean, re.DOTALL)
+    if m:
+        try:
+            return {'goal': 'auto', 'steps': json.loads(m.group(1))}
+        except Exception:
+            pass
+ 
+    return None
+ 
+ 
+async def _build_plan(ctx) -> list:
+    """
+    Ask the LLM to produce an ordered list of ToolSteps.
+    Uses generate_safe() — never raises, never segfaults.
+    Sequential: waits for the LLM to fully finish before returning.
+    """
     try:
         from app.llm.engine import llm_engine
+ 
         caps_summary = ", ".join(
             k for k, v in ctx.caps.as_dict().items()
             if isinstance(v, bool) and v
         ) or "chat"
-
-        raw = await asyncio.wait_for(
-            llm_engine.generate(
-                [{"role": "user", "content": _PLAN_PROMPT.format(
-                    caps=caps_summary,
-                    request=ctx.user_text,
-                )}],
-                system_prompt="Return only valid JSON.",
-            ),
-            timeout=20.0,
+ 
+        raw = await llm_engine.generate_safe(
+            [{"role": "user", "content": _PLAN_PROMPT.format(
+                caps=caps_summary,
+                request=ctx.user_text,
+            )}],
+            system_prompt="Return only valid JSON. No markdown, no prose.",
+            timeout=25.0,
         )
-        clean = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-        m     = re.search(r"\{.*\}", clean, re.DOTALL)
-        if not m:
+ 
+        if not raw:
+            logger.warning("_build_plan: empty LLM response")
             return []
-        data  = json.loads(m.group())
+ 
+        data = _parse_plan_json(raw)
+        if not data:
+            logger.warning("_build_plan: could not parse JSON from: {}", raw[:120])
+            return []
+ 
+        from app.agents.coordinator import ToolStep
         steps = []
         for s in data.get("steps", []):
             if not s.get("tool"):
@@ -258,11 +338,12 @@ async def _build_plan(ctx: CoordinatorContext) -> list[ToolStep]:
                 params=s.get("params", {}),
                 required=s.get("required", True),
             ))
+ 
         logger.info("Coordinator plan: {} steps — {}", len(steps), [s.tool for s in steps])
         return steps
-
+ 
     except Exception as exc:
-        logger.error("Plan generation failed: {}", exc)
+        logger.error("_build_plan failed: {}", exc)
         return []
 
 
@@ -282,14 +363,33 @@ Do NOT include JSON — respond in plain natural language only.
 
 
 async def _synthesise(ctx: CoordinatorContext) -> str:
-    """Turn the collected step results into a final spoken response."""
+    """Turn collected step results into a final spoken response."""
+ 
+    # If no results at all — return fast, don't waste a 35s LLM call
     if not ctx.step_results:
-        return "I wasn't able to complete that task."
-
+        return "I wasn't able to complete that task. Please try again."
+ 
+    ok_results  = [r for r in ctx.step_results if r.status == "ok"]
+    err_results = [r for r in ctx.step_results if r.status != "ok"]
+ 
+    # All steps failed — return error immediately, no LLM synthesis needed
+    if not ok_results:
+        tools_tried = ", ".join(r.tool for r in err_results)
+        return (
+            f"I tried to help but ran into errors with: {tools_tried}. "
+            "Please check the logs or try rephrasing your request."
+        )
+ 
+    # If only one step succeeded and result is already human-readable — return it directly
+    if len(ok_results) == 1 and len(ok_results[0].result) < 800:
+        return ok_results[0].result
+ 
+    # Multiple steps — synthesise with LLM
     results_text = "\n".join(
         f"[{r.tool}] ({r.status}): {r.result[:400]}"
         for r in ctx.step_results
     )
+ 
     try:
         from app.llm.engine import llm_engine
         from app.prompts.templates import build_system_prompt
@@ -298,22 +398,21 @@ async def _synthesise(ctx: CoordinatorContext) -> str:
             conversation_history=ctx.conv_history,
             plan_context="",
         )
-        response = await asyncio.wait_for(
-            llm_engine.generate(
-                [{"role": "user", "content": _SYNTH_PROMPT.format(
-                    request=ctx.user_text,
-                    results=results_text,
-                )}],
-                system_prompt=system,
-            ),
-            timeout=30.0,
+        response = await llm_engine.generate_safe(
+            [{"role": "user", "content": _SYNTH_PROMPT.format(
+                request=ctx.user_text,
+                results=results_text,
+            )}],
+            system_prompt=system,
+            timeout=25.0,    # tighter timeout — synthesis should be fast
         )
-        return response.strip()
+        if response:
+            return response.strip()
     except Exception as exc:
-        logger.error("Synthesis failed: {}", exc)
-        # Fallback: return the last successful result
-        ok = [r for r in ctx.step_results if r.status == "ok"]
-        return ok[-1].result if ok else "Task completed with errors."
+        logger.error("Synthesis LLM call failed: {}", exc)
+ 
+    # Fallback — return the best result we have
+    return ok_results[-1].result if ok_results else "Task completed."
 
 
 # ─── Coordinator ─────────────────────────────────────────────────────────────
@@ -354,8 +453,8 @@ class Coordinator:
         # Build plan
         steps = await _build_plan(ctx)
         if not steps:
-            # No plan — fall back to direct LLM
-            logger.info("Coordinator: no plan generated, falling back to direct LLM")
+            logger.info("Coordinator: no plan generated, waiting 200ms then falling back to direct LLM")
+            await asyncio.sleep(0.2)   # give lock time to fully release
             return await self._direct_llm(ctx)
 
         # Execute each step with critic evaluation
@@ -416,9 +515,10 @@ class Coordinator:
         from app.llm.engine import llm_engine
         from app.prompts.templates import build_system_prompt
         system = build_system_prompt(ctx.memory_ctx, ctx.conv_history, "")
-        response = await llm_engine.generate(
+        response = await llm_engine.generate_safe(
             [{"role": "user", "content": ctx.user_text}],
             system_prompt=system,
+            timeout=30.0,
         )
         await self._archive(ctx.user_text, response)
         return response.strip()

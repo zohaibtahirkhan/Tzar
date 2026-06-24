@@ -54,14 +54,38 @@ class Capabilities:
         return "chat"
 
     def is_complex(self) -> bool:
-        """True when 2+ capabilities are needed — warrants orchestration."""
-        return sum([
+        """
+        True when the query genuinely needs multi-step orchestration.
+ 
+        Single-tool queries with a secondary signal (e.g. search notes = tool+rag)
+        are NOT complex — they go through the fast pipeline path.
+ 
+        Truly complex = planning involved, OR research+tools (requires web+save),
+        OR 3+ flags set simultaneously.
+        """
+        flags = [
             self.needs_tools,
             self.needs_memory,
             self.needs_research,
             self.needs_planning,
             self.needs_rag,
-        ]) >= 2
+        ]
+        flag_count = sum(flags)
+ 
+        # 3+ flags always means complex
+        if flag_count >= 3:
+            return True
+ 
+        # Planning + anything else = complex
+        if self.needs_planning and flag_count >= 2:
+            return True
+ 
+        # Research + tools = needs web search then save = complex
+        if self.needs_research and self.needs_tools:
+            return True
+ 
+        # Everything else (tool+rag, tool+memory, rag alone, etc.) = simple
+        return False
 
     def as_dict(self) -> dict:
         return {
@@ -126,6 +150,16 @@ _MEMORY_SIGNALS: list[tuple[str, bool]] = [
     ("what do i know about", False),
     ("what are my projects", False),
     ("what projects", False),
+    ("what are my preferences", False),      # "What are my preferences?"
+    ("what do i like", False),               # common variant
+    ("what do i prefer", False),             # another variant
+    ("what are my settings", False),
+    ("what have i told you about me", False),
+    ("tell me about myself", False),
+    ("what do you know about my preferences", False),
+    ("what do i dislike", False), 
+    ("what are my goals", False),
+    ("what projects do i have", False),
 ]
 
 _RESEARCH_SIGNALS: list[tuple[str, bool]] = [

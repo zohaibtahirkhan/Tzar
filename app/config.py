@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ─── LLM ──────────────────────────────────────────────────────────────────
     llm_model_path: Path = BASE_DIR / "models" / "qwen2.5-3b-instruct-q4_k_m.gguf"
-    llm_context_length: int = 4096
+    llm_context_length: int = 8192
     llm_threads: int = 6          # leave 2 threads for OS / audio
     llm_max_tokens: int = 400
     llm_temperature: float = 0.7
