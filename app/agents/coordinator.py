@@ -40,6 +40,28 @@ from loguru import logger
 from app.config import settings
 
 
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+# Execution limits
+MAX_STEP_RETRIES = 1  # Max retry attempts per step
+TOOL_EXECUTION_TIMEOUT_SECONDS = 30.0  # Timeout per tool execution
+PLAN_GENERATION_TIMEOUT_SECONDS = 25.0  # Timeout for plan LLM call
+SYNTHESIS_TIMEOUT_SECONDS = 25.0  # Timeout for synthesis LLM call
+DIRECT_LLM_TIMEOUT_SECONDS = 30.0  # Timeout for fallback direct LLM
+
+# Result size limits
+MAX_STEP_RESULT_CHARS = 2000  # Max chars per step result
+MAX_SYNTHESIS_RESULT_CHARS = 800  # Threshold for direct return
+MAX_SYNTHESIS_CONTEXT_CHARS = 400  # Max chars per result in synthesis context
+
+# Coordinator wait times
+FALLBACK_DELAY_SECONDS = 0.2  # Wait before falling back to direct LLM
+
+# Critic timeouts
+CRITIC_EVALUATION_TIMEOUT_SECONDS = 15.0
+MAX_CRITIC_RESULT_PREVIEW_CHARS = 600  # Max chars shown to critic
+
+
 # ─── Data structures ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -99,12 +121,12 @@ class ToolExecutor:
         try:
             result = await asyncio.wait_for(
                 router.dispatch({"tool": step.tool, **step.params}),
-                timeout=30.0,
+                timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
             )
             return StepResult(
                 tool=step.tool,
                 status=result.get("status", "ok"),
-                result=str(result.get("result", ""))[:2000],
+                result=str(result.get("result", ""))[:MAX_STEP_RESULT_CHARS],
                 elapsed_ms=(time.perf_counter() - t0) * 1000,
             )
         except asyncio.TimeoutError:
@@ -157,10 +179,10 @@ class Critic:
                 [{"role": "user", "content": _CRITIC_PROMPT.format(
                     request=request,
                     action=step.description,
-                    result=result.result[:600],
+                    result=result.result[:MAX_CRITIC_RESULT_PREVIEW_CHARS],
                 )}],
                 system_prompt="Return only valid JSON. Be strict but fair.",
-                timeout=15.0,
+                timeout=CRITIC_EVALUATION_TIMEOUT_SECONDS,
             )
             if not raw:
                 return CriticResult(satisfied=True, reason="Critic returned empty — assuming ok.")
@@ -190,12 +212,23 @@ _PLAN_PROMPT = """\
 You are a task planner for a local voice assistant.
 Produce a minimal execution plan for the user request.
  
-Respond ONLY in JSON — no prose, no markdown fences.
+CRITICAL: Output ONLY valid JSON. No markdown fences, no prose, no explanations.
+Start your response with { and end with }
  
+EXACT FORMAT (copy this structure):
 {
   "goal": "one sentence describing the end goal",
   "steps": [
     {"description": "what this step does", "tool": "tool_name", "params": {"param_name": "value"}, "required": true}
+  ]
+}
+ 
+EXAMPLE OUTPUT:
+{
+  "goal": "Create a note about machine learning",
+  "steps": [
+    {"description": "Search vault for related notes", "tool": "obsidian_search", "params": {"query": "machine learning"}, "required": false},
+    {"description": "Create new note with content", "tool": "obsidian_create_note", "params": {"title": "Machine Learning Overview", "content": "Key concepts..."}, "required": true}
   ]
 }
  
@@ -256,20 +289,24 @@ Rules:
 
 def _parse_plan_json(raw: str) -> dict | None:
     """
-    Robust JSON parser for LLM plan output.
-    Handles four failure modes Qwen 2.5 3B produces:
-      1. Normal: {"goal": ..., "steps": [...]}
-      2. No outer braces: just the interior  ← actual failure in logs
-      3. Markdown fenced: ```json ... ```
-      4. Truncated: hit max_tokens mid-object
+    Robust JSON parser for LLM plan output with multiple fallback strategies.
+    
+    Handles common LLM output issues:
+      1. Valid JSON with proper braces
+      2. Missing outer braces (interior content only)
+      3. Markdown fences (```json...```)
+      4. Truncated output (hit max_tokens)
+      5. Mixed prose + JSON
+    
+    Returns None if all parsing strategies fail.
     """
     if not raw or not raw.strip():
         return None
  
-    # Strip markdown fences
+    # Strip markdown fences first
     clean = re.sub(r'```[a-zA-Z]*\n?|```', '', raw.strip()).strip()
  
-    # 1. Starts with { — use outermost braces
+    # Strategy 1: Standard JSON with outer braces
     if clean.startswith('{'):
         end = clean.rfind('}')
         if end != -1:
@@ -278,20 +315,32 @@ def _parse_plan_json(raw: str) -> dict | None:
             except json.JSONDecodeError:
                 pass
  
-    # 2. Interior without outer braces — wrap and try
-    try:
-        return json.loads('{' + clean + '}')
-    except json.JSONDecodeError:
-        pass
- 
-    # 3. Extract steps array directly as last resort
-    m = re.search(r'"steps"\s*:\s*(\[.*?\])', clean, re.DOTALL)
-    if m:
+    # Strategy 2: Extract JSON from prose (find first { to last })
+    match = re.search(r'\{.*\}', clean, re.DOTALL)
+    if match:
         try:
-            return {'goal': 'auto', 'steps': json.loads(m.group(1))}
-        except Exception:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
             pass
  
+    # Strategy 3: Missing outer braces - wrap and try
+    if '"goal"' in clean and '"steps"' in clean:
+        try:
+            return json.loads('{' + clean + '}')
+        except json.JSONDecodeError:
+            pass
+ 
+    # Strategy 4: Extract steps array only (minimal recovery)
+    steps_match = re.search(r'"steps"\s*:\s*(\[.*?\])', clean, re.DOTALL)
+    if steps_match:
+        try:
+            steps = json.loads(steps_match.group(1))
+            return {'goal': 'auto', 'steps': steps}
+        except json.JSONDecodeError:
+            pass
+ 
+    # All strategies failed
+    logger.error("Plan JSON parsing failed after 4 strategies. Raw output: {}", raw[:200])
     return None
  
  
@@ -314,8 +363,8 @@ async def _build_plan(ctx) -> list:
                 caps=caps_summary,
                 request=ctx.user_text,
             )}],
-            system_prompt="Return only valid JSON. No markdown, no prose.",
-            timeout=25.0,
+            system_prompt="You are a JSON-only output agent. Return ONLY valid JSON starting with { and ending with }. No markdown, no explanations.",
+            timeout=PLAN_GENERATION_TIMEOUT_SECONDS,
         )
  
         if not raw:
@@ -381,12 +430,12 @@ async def _synthesise(ctx: CoordinatorContext) -> str:
         )
  
     # If only one step succeeded and result is already human-readable — return it directly
-    if len(ok_results) == 1 and len(ok_results[0].result) < 800:
+    if len(ok_results) == 1 and len(ok_results[0].result) < MAX_SYNTHESIS_RESULT_CHARS:
         return ok_results[0].result
  
     # Multiple steps — synthesise with LLM
     results_text = "\n".join(
-        f"[{r.tool}] ({r.status}): {r.result[:400]}"
+        f"[{r.tool}] ({r.status}): {r.result[:MAX_SYNTHESIS_CONTEXT_CHARS]}"
         for r in ctx.step_results
     )
  
@@ -404,7 +453,7 @@ async def _synthesise(ctx: CoordinatorContext) -> str:
                 results=results_text,
             )}],
             system_prompt=system,
-            timeout=25.0,    # tighter timeout — synthesis should be fast
+            timeout=SYNTHESIS_TIMEOUT_SECONDS,    # tighter timeout — synthesis should be fast
         )
         if response:
             return response.strip()
@@ -453,8 +502,8 @@ class Coordinator:
         # Build plan
         steps = await _build_plan(ctx)
         if not steps:
-            logger.info("Coordinator: no plan generated, waiting 200ms then falling back to direct LLM")
-            await asyncio.sleep(0.2)   # give lock time to fully release
+            logger.info("Coordinator: no plan generated, waiting {}ms then falling back to direct LLM", int(FALLBACK_DELAY_SECONDS * 1000))
+            await asyncio.sleep(FALLBACK_DELAY_SECONDS)   # give lock time to fully release
             return await self._direct_llm(ctx)
 
         # Execute each step with critic evaluation
@@ -488,7 +537,7 @@ class Coordinator:
         self,
         step: ToolStep,
         ctx: CoordinatorContext,
-        max_retries: int = 1,
+        max_retries: int = MAX_STEP_RETRIES,
     ) -> StepResult:
         """Run a step. If critic is unsatisfied, retry once with the suggestion."""
         for attempt in range(max_retries + 1):
@@ -518,7 +567,7 @@ class Coordinator:
         response = await llm_engine.generate_safe(
             [{"role": "user", "content": ctx.user_text}],
             system_prompt=system,
-            timeout=30.0,
+            timeout=DIRECT_LLM_TIMEOUT_SECONDS,
         )
         await self._archive(ctx.user_text, response)
         return response.strip()

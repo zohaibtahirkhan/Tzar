@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_log_level: str = "info"
+    allowed_origins: str = ""  # Comma-separated additional origins for CORS
 
     # ─── Performance targets (ms) ─────────────────────────────────────────────
     target_wake_latency_ms: int = 200

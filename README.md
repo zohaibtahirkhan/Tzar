@@ -2,7 +2,7 @@
 
 A fully local, privacy-first AI assistant with voice I/O, Obsidian integration, Knowledge Graph, RAG over local documents, multi-agent orchestration, and a self-improving skills system. Runs entirely on-device. Nothing leaves your machine unless you explicitly enable web search.
 
-Named after **حافظ** — the keeper, the one who preserves.
+Named after **ضار** — the keeper, the one who preserves.
 
 ---
 

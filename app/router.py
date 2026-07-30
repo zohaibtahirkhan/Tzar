@@ -93,12 +93,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ─── CORS Configuration ───────────────────────────────────────────────────────
+# Configure allowed origins for API access
+# For production: restrict to specific domains only
+# For development: include localhost and common dev ports
+
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",      # React dev server
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",      # Vite dev server
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",      # Alternative dev port
+    "http://127.0.0.1:8080",
+]
+
+# Add production origins from environment variable if set
+if hasattr(settings, 'allowed_origins') and settings.allowed_origins:
+    ALLOWED_ORIGINS.extend(settings.allowed_origins.split(','))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000",
-               "http://localhost:5173", "http://127.0.0.1:5173", "*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH"],
     allow_headers=["*"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 
@@ -262,6 +281,43 @@ async def toggle_multi_agent(req: MultiAgentToggle):
     status = "enabled" if req.enabled else "disabled"
     logger.info("Multi-agent mode {} via API", status)
     return {"multi_agent": req.enabled, "status": status}
+
+
+# ─── Cache Management ─────────────────────────────────────────────────────────
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Get response cache statistics."""
+    from app.cache import response_cache
+    return response_cache.stats()
+
+
+@app.post("/cache/clear")
+async def cache_clear():
+    """Clear the entire response cache."""
+    from app.cache import response_cache
+    count = await response_cache.clear()
+    return {"cleared": count, "status": "success"}
+
+
+@app.post("/cache/prune")
+async def cache_prune():
+    """Remove expired entries from cache."""
+    from app.cache import response_cache
+    count = await response_cache.prune_expired()
+    return {"pruned": count, "status": "success"}
+
+
+@app.post("/cache/toggle")
+async def cache_toggle(enabled: bool):
+    """Enable or disable response caching."""
+    from app.cache import response_cache
+    if enabled:
+        response_cache.enable()
+    else:
+        response_cache.disable()
+    return {"enabled": enabled, "status": "success"}
+
 
 # ─── WebSocket Audio ──────────────────────────────────────────────────────────
 

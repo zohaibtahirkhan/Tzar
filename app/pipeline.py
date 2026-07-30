@@ -45,6 +45,28 @@ from app.memory.session_store import log_turn
 from app.intent import classify, classify_intent, IntentType, Capabilities
 from app.planner import make_plan, needs_planning
 from app.planning.goal_tracker import goal_tracker
+from app.cache import response_cache
+
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+# Tool result size limits
+TOOL_RESULT_MAX_CHARS = 1200  # ~340 tokens — safe budget for followup call
+TOOL_RESULT_MAX_DISPLAY_CHARS = 800  # For UI display in SSE responses
+
+# Loop detection
+MAX_TOOL_ITERATIONS = 4  # Maximum tool calls per query
+TOOL_EXECUTION_TIMEOUT_SECONDS = 30.0  # Timeout per tool call
+
+# Response size limits
+MAX_SINGLE_RESULT_CHARS = 800  # Direct return threshold for single results
+MAX_RESPONSE_PREVIEW_CHARS = 120  # Log preview length
+
+# Memory context
+MAX_CONVERSATION_HISTORY_CHARS = 1800  # Max chars for conversation context
+
+# Complex task detection
+COMPLEX_TASK_TOOL_THRESHOLD = 3  # Number of tool calls that indicates complexity
 
 
 # ─── Speech metadata ─────────────────────────────────────────────────────────
@@ -91,20 +113,17 @@ def strip_tool_calls_safe(raw) -> str:
 
 # ─── Tool result truncation ───────────────────────────────────────────────────
 
-_TOOL_RESULT_MAX_CHARS = 1200   # ~340 tokens — safe budget for followup call
-
-
 def _truncate_tool_result(result_text: str, tool_name: str) -> str:
     """
     Cap large tool results so they don't blow the 4096-token context.
     list_documents (667 docs) and system_profile are the main offenders.
     """
-    if not result_text or len(result_text) <= _TOOL_RESULT_MAX_CHARS:
+    if not result_text or len(result_text) <= TOOL_RESULT_MAX_CHARS:
         return result_text or ""
 
-    truncated  = result_text[:_TOOL_RESULT_MAX_CHARS]
+    truncated  = result_text[:TOOL_RESULT_MAX_CHARS]
     last_nl    = truncated.rfind('\n')
-    if last_nl > _TOOL_RESULT_MAX_CHARS * 0.6:
+    if last_nl > TOOL_RESULT_MAX_CHARS * 0.6:
         truncated = truncated[:last_nl]
 
     total_lines = result_text.count('\n')
@@ -202,12 +221,12 @@ class AssistantPipeline:
         try:
             result = await asyncio.wait_for(
                 self.tool_router.dispatch({"tool": tool_name, **tool_params}),
-                timeout=30.0,
+                timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
             )
             return result, int((time.monotonic() - start) * 1000)
         except asyncio.TimeoutError:
-            logger.error("Tool '{}' timed out after 30s", tool_name)
-            return {"tool": tool_name, "status": "error", "result": "Tool timed out."}, 30000
+            logger.error("Tool '{}' timed out after {}s", tool_name, TOOL_EXECUTION_TIMEOUT_SECONDS)
+            return {"tool": tool_name, "status": "error", "result": "Tool timed out."}, int(TOOL_EXECUTION_TIMEOUT_SECONDS * 1000)
         except Exception:
             logger.exception("Tool '{}' failed", tool_name)
             return {"tool": tool_name, "status": "error", "result": "Tool execution failed."}, int((time.monotonic() - start) * 1000)
@@ -248,6 +267,13 @@ class AssistantPipeline:
 
     async def process_text_input(self, user_text: str) -> str:
         logger.info("User: {}", user_text)
+
+        # ── Cache check (for simple conversational queries) ───────────────────
+        cached_response = await response_cache.get(user_text)
+        if cached_response:
+            logger.info("Cache HIT - returning cached response")
+            await self._archive_turn(user_text, cached_response)
+            return cached_response
 
         # ── Morning briefing fast-path ────────────────────────────────────────
         if _is_morning_greeting(user_text):
@@ -343,7 +369,7 @@ class AssistantPipeline:
         iterations  = 0
         seen_calls  = set()
 
-        while tool_name and iterations < 4:
+        while tool_name and iterations < MAX_TOOL_ITERATIONS:
             iterations += 1
 
             # Detect repeated tool loops
@@ -366,7 +392,7 @@ class AssistantPipeline:
             self._last_tool_results.append({
                 "tool":        result.get("tool", tool_name),
                 "status":      result.get("status", "ok"),
-                "result":      result_text[:800],
+                "result":      result_text[:TOOL_RESULT_MAX_DISPLAY_CHARS],
                 "duration_ms": duration_ms,
             })
 
@@ -404,10 +430,15 @@ class AssistantPipeline:
         logger.info("Speech meta: pace={} pause_ms={} tone={} interruptible={}",
                     self._speech_meta.pace, self._speech_meta.pause_ms,
                     self._speech_meta.tone, self._interruptible)
-        logger.info("Assistant: {}", spoken[:120])
+        logger.info("Assistant: {}", spoken[:MAX_RESPONSE_PREVIEW_CHARS])
         await self._archive_turn(user_text, spoken)
 
-        if iterations >= 3:
+        # ── Cache the response (if no tools were used - conversational only) ──
+        if iterations == 0 and not caps.needs_tools:
+            await response_cache.set(user_text, spoken)
+            logger.debug("Response cached for future queries")
+
+        if iterations >= COMPLEX_TASK_TOOL_THRESHOLD:
             logger.info("Complex task ({} tool calls).", iterations)
 
         return spoken
@@ -538,7 +569,7 @@ class AssistantPipeline:
         iterations = 0
         seen_calls = set()
 
-        while tool_name and iterations < 4:
+        while tool_name and iterations < MAX_TOOL_ITERATIONS:
             iterations += 1
 
             # Detect repeated tool loops
@@ -563,7 +594,7 @@ class AssistantPipeline:
             self._last_tool_results.append({
                 "tool":        result.get("tool", tool_name),
                 "status":      result.get("status", "ok"),
-                "result":      result_text[:800],
+                "result":      result_text[:TOOL_RESULT_MAX_DISPLAY_CHARS],
                 "duration_ms": duration_ms,
             })
 
@@ -653,7 +684,9 @@ class AssistantPipeline:
     def interrupt(self) -> None:
         if self._speaking and self._interruptible:
             self._interrupted = True
-            logger.debug("TTS interrupted (interruptible=True)")
+            # Stop audio playback immediately and clean up resources
+            audio_player.stop()
+            logger.debug("TTS interrupted (interruptible=True) - audio stopped and cleaned up")
         elif self._speaking and not self._interruptible:
             logger.debug("Interrupt blocked — response marked non-interruptible")
 

@@ -18,7 +18,9 @@ from app.config import settings
 
 class LLMEngine:
     def __init__(self):
-        self._lock = asyncio.Lock()
+        # Use semaphore instead of lock to allow controlled concurrent access
+        # For CPU: limit=1, for GPU: limit=num_gpu_cores
+        self._semaphore = asyncio.Semaphore(1)  # CPU-only: 1 concurrent inference
         self._client: Optional[httpx.AsyncClient] = None
         self._llm = None
         self._base_url = settings.LLM_OLLAMA_HOST
@@ -83,99 +85,19 @@ class LLMEngine:
             return False
 
     def is_loaded(self) -> bool:
-        """
-        Check if llm has been loaded or not
-        """
+        """Check if LLM has been loaded successfully."""
         if settings.LLM_BACKEND == "ollama":
-            try:
-                return getattr(self, "_ollama_available", False)
-            except:
-                print("Please pull or run Model")
-        if settings.LLM_BACKEND == "llamacpp":
-            try:
-                return self._llm is not None
-            except:
-                self.load()
-            
-    def _build_payload(
-        self,
-        messages: list[dict],
-        system_prompt: str = "",
-        stream: bool = True
-    ) -> dict:
-        ollama_messages = []
-        if system_prompt:
-            ollama_messages.append({"role": "system", "content": system_prompt})
-        ollama_messages.extend(messages)
-
-        return {
-            "model": self._model,
-            "messages": ollama_messages,
-            "stream": stream,
-            "options": {
-                "temperature": settings.llm_temperature,
-                "num_ctx": settings.llm_context_length,
-                "num_predict": settings.llm_max_tokens,
-                "stop": ["User:", "Human:", "\nUser", "\nHuman", "You:"],
-            }
-        }
-    # For Ollama
-    # async def generate(
-    #     self,
-    #     messages: list[dict],
-    #     system_prompt: str = ""
-    # ) -> str:
-    #     """Non-streaming generation. Returns full response text."""
-    #     async with self._lock:
-    #         client = await self._get_client()
-    #         payload = self._build_payload(messages, system_prompt, stream=False)
-
-    #         try:
-    #             r = await client.post("/api/chat", json=payload)
-    #             r.raise_for_status()
-    #             return r.json()["message"]["content"]
-    #         except httpx.HTTPStatusError as e:
-    #             logger.error("Ollama HTTP error: {} — {}", e.response.status_code, e.response.text)
-    #             raise
-    #         except Exception as e:
-    #             logger.error("Ollama generate failed: {}", e)
-    #             raise
+            return getattr(self, "_ollama_available", False)
+        elif settings.LLM_BACKEND == "llamacpp":
+            return self._llm is not None
+        return False
 
     # async def generate_stream(
-    #     self,
-    #     messages: list[dict],
-    #     system_prompt: str = ""
-    # ) -> AsyncIterator[str]:
-    #     """
     #     Streaming generation. Yields text chunks as they arrive.
     #     Uses a queue internally so the lock is released between chunks,
     #     allowing other coroutines to run.
     #     """
     #     async with self._lock:
-    #         client = await self._get_client()
-    #         payload = self._build_payload(messages, system_prompt, stream=True)
-
-    #         try:
-    #             async with client.stream("POST", "/api/chat", json=payload) as response:
-    #                 response.raise_for_status()
-    #                 async for line in response.aiter_lines():
-    #                     if not line:
-    #                         continue
-    #                     try:
-    #                         chunk = json.loads(line)
-    #                         token = chunk.get("message", {}).get("content", "")
-    #                         if token:
-    #                             yield token
-    #                         if chunk.get("done"):
-    #                             break
-    #                     except json.JSONDecodeError:
-    #                         continue
-    #         except httpx.HTTPStatusError as e:
-    #             logger.error("Ollama stream error: {}", e)
-    #             raise
-    #         except Exception as e:
-    #             logger.error("Ollama stream failed: {}", e)
-    #             raise
     
     async def generate_stream(
         self,
@@ -284,15 +206,13 @@ class LLMEngine:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)   # sentinel
  
-        # ── Hold the lock for the entire inference pass ──────────────────────
-        # Using try/finally ensures the lock is released even if:
+        # ── Use semaphore for controlled concurrent access ──────────────────
+        # Semaphore allows N concurrent inferences (configurable)
+        # Using async context manager ensures release even if:
         #   - the caller abandons the generator (aclose())
         #   - _run_inference raises
         #   - queue.get() raises
-        acquired = False
-        try:
-            await self._lock.acquire()
-            acquired = True
+        async with self._semaphore:
             await loop.run_in_executor(None, _run_inference)
  
             t_first = None
@@ -303,9 +223,6 @@ class LLMEngine:
                 if t_first is None:
                     t_first = time.perf_counter()
                 yield token
-        finally:
-            if acquired:
-                self._lock.release()
 
     async def generate(
         self,

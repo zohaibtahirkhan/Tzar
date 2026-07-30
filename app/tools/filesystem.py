@@ -22,15 +22,32 @@ def _safe_path(relative_path: str) -> Path:
     """
     Resolve a user-supplied relative path to an absolute path inside the
     workspace. Raises PermissionError if the resolved path escapes the sandbox.
+    
+    Security Features:
+    - Prevents path traversal attacks (../, ../../, etc.)
+    - Blocks absolute paths that escape workspace
+    - Resolves symlinks and validates final location
+    - Strips null bytes and control characters
     """
+    # Security: Remove null bytes and control characters
+    relative_path = "".join(c for c in relative_path if c.isprintable() and c != '\0')
+    
     # Strip leading slashes to force relative resolution
     relative_path = relative_path.lstrip("/")
+    
+    # Resolve to absolute path (follows symlinks)
     candidate = (ALLOWED_ROOT / relative_path).resolve()
 
-    if not str(candidate).startswith(str(ALLOWED_ROOT)):
+    # Critical check: Ensure resolved path is within workspace
+    # Use is_relative_to() for robust checking (Python 3.9+)
+    try:
+        candidate.relative_to(ALLOWED_ROOT)
+    except ValueError:
         raise PermissionError(
-            f"Path '{relative_path}' resolves outside the workspace. Access denied."
+            f"Path traversal denied: '{relative_path}' resolves outside workspace. "
+            f"All operations must stay within {ALLOWED_ROOT}"
         )
+    
     return candidate
 
 

@@ -29,3 +29,8 @@ Thumbs.db
 coverage/
 .vite/
 *.tsbuildinfo
+
+
+# md files
+RESEARCH_PAPER.md
+IMPLEMENTATION_SUMMARY.md

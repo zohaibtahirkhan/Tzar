@@ -126,6 +126,7 @@ class AudioPlayer:
 
     def __init__(self):
         self._sd = None
+        self._current_stream = None  # Track active playback for cleanup
 
     def _get_sd(self):
         if self._sd is None:
@@ -140,8 +141,11 @@ class AudioPlayer:
         sd = self._get_sd()
         if sd is None:
             return
-        sd.play(audio, samplerate=sample_rate, device=settings.audio_output_device)
+        
+        # Store current stream for potential interrupt
+        self._current_stream = sd.play(audio, samplerate=sample_rate, device=settings.audio_output_device)
         sd.wait()
+        self._current_stream = None  # Clear after playback completes
 
     async def play_async(self, audio: np.ndarray, sample_rate: int = settings.tts_sample_rate) -> None:
         loop = asyncio.get_event_loop()
@@ -151,6 +155,19 @@ class AudioPlayer:
         """Play audio chunks as they arrive from the TTS stream."""
         async for chunk in audio_gen:
             await self.play_async(chunk)
+    
+    def stop(self) -> None:
+        """Stop current playback immediately and release audio resources."""
+        sd = self._get_sd()
+        if sd is None:
+            return
+        
+        try:
+            sd.stop()
+            self._current_stream = None
+            logger.debug("AudioPlayer: stopped and cleaned up")
+        except Exception as e:
+            logger.warning("AudioPlayer cleanup error: {}", e)
 
 
 # Singletons
