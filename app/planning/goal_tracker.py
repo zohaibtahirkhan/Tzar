@@ -29,7 +29,6 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
 import aiosqlite
@@ -155,9 +154,13 @@ async def _load_goal(db: aiosqlite.Connection, goal_id: int) -> Optional[Goal]:
 
 # ─── GoalTracker ──────────────────────────────────────────────────────────────
 
+# Anchored: the whole utterance must be the command. A bare "next" inside a
+# longer question ("what's the next train?") is not a goal continuation.
 _CONTINUATION_RE = re.compile(
-    r"\b(continue|next step|what'?s next|proceed|go ahead|keep going|resume|"
-    r"next|what do i do next|carry on|move on)\b",
+    r"(?:ok(?:ay)?[,\s]+|yes[,\s]+|please\s+)?"
+    r"(continue|next step|what'?s next|proceed|go ahead|keep going|resume|"
+    r"next|what do i do next|carry on|move on)"
+    r"(?:\s+please)?[.!?]*",
     re.IGNORECASE,
 )
 
@@ -183,29 +186,36 @@ class GoalTracker:
     async def create_goal(
         self,
         user_text: str,
-        steps: list[dict],          # list of {description, tool, params}
+        steps: list[dict],          # list of {description, tool?, params?, status?}
         project_name: str = "",
-    ) -> Goal:
+        title: str = "",
+    ) -> Optional[Goal]:
         """
         Persist a new goal with its steps. Returns the created Goal.
         steps: same format as ToolStep dicts from the coordinator plan.
+        title: pass the planner's goal sentence to skip the title LLM call.
         """
+        if not settings.goal_tracking_enabled:
+            return None
         await self._ensure_init()
-        title = await self._generate_title(user_text)
+        title = title.strip() or await self._generate_title(user_text)
+
+        statuses = [s.get("status", "pending") for s in steps]
+        goal_status = "completed" if steps and all(st in ("done", "skipped") for st in statuses) else "in_progress"
 
         async with aiosqlite.connect(str(_DB_PATH)) as db:
             cur = await db.execute(
                 "INSERT INTO goals (user_text, title, status, project_name) VALUES (?,?,?,?)",
-                (user_text, title, "in_progress", project_name),
+                (user_text, title, goal_status, project_name),
             )
             goal_id = cur.lastrowid
-            for i, s in enumerate(steps):
-                await db.execute(
-                    "INSERT INTO goal_steps (goal_id, step_order, description, tool, params_json) "
-                    "VALUES (?,?,?,?,?)",
-                    (goal_id, i, s.get("description", ""), s.get("tool", ""),
-                     json.dumps(s.get("params", {}))),
-                )
+            await db.executemany(
+                "INSERT INTO goal_steps (goal_id, step_order, description, tool, params_json, status, completed_at) "
+                "VALUES (?,?,?,?,?,?, CASE WHEN ?='done' THEN datetime('now') END)",
+                [(goal_id, i, s.get("description", ""), s.get("tool", ""),
+                  json.dumps(s.get("params", {})), st, st)
+                 for i, (s, st) in enumerate(zip(steps, statuses))],
+            )
             await db.commit()
 
         logger.info("GoalTracker: created goal #{} — '{}' ({} steps)", goal_id, title, len(steps))
@@ -291,7 +301,9 @@ class GoalTracker:
 
     def is_continuation(self, user_text: str) -> bool:
         """True if the user is asking to continue the current goal."""
-        return bool(_CONTINUATION_RE.search(user_text))
+        if not settings.goal_tracking_enabled:
+            return False
+        return bool(_CONTINUATION_RE.fullmatch(user_text.strip()))
 
     async def resume_response(self, goal: Goal) -> str:
         """

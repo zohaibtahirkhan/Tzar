@@ -141,13 +141,25 @@ def test_safe_path_blocks_traversal():
         _safe_path("subdir/../../etc/hosts")
 
 
-def test_safe_path_blocks_absolute():
-    """Test that absolute paths outside workspace are blocked."""
+def test_safe_path_contains_absolute():
+    """
+    Absolute paths must never reach the real filesystem root.
+
+    _safe_path() strips leading separators rather than raising, so an absolute
+    path is neutralised into a workspace-relative one. The security property
+    under test is containment: the result always stays inside ALLOWED_ROOT.
+    """
+    from app.tools.filesystem import ALLOWED_ROOT
+
+    for hostile in ("/etc/passwd", "/root/.bashrc", "//etc/shadow"):
+        resolved = _safe_path(hostile)
+        assert resolved.is_relative_to(ALLOWED_ROOT), (
+            f"{hostile} escaped the sandbox -> {resolved}"
+        )
+
+    # Traversal that would climb out is still rejected outright.
     with pytest.raises(PermissionError, match="Path traversal denied"):
-        _safe_path("/etc/passwd")
-    
-    with pytest.raises(PermissionError, match="Path traversal denied"):
-        _safe_path("/root/.bashrc")
+        _safe_path("/../../etc/passwd")
 
 
 def test_safe_path_null_byte_filtering():
@@ -186,26 +198,19 @@ async def test_tool_executor_basic():
 
 @pytest.mark.asyncio
 async def test_tool_executor_timeout():
-    """Test tool execution timeout."""
+    """A tool that overruns is reported as an error by dispatch(), so every caller sees it."""
     executor = ToolExecutor()
-    
-    # Mock a tool that takes too long
-    with patch('app.tools.router.ToolRouter.dispatch', new_callable=AsyncMock) as mock_dispatch:
-        async def slow_tool(*args, **kwargs):
-            await asyncio.sleep(35)  # Longer than timeout
-            return {"status": "ok", "result": "done"}
-        
-        mock_dispatch.side_effect = slow_tool
-        
-        step = ToolStep(
-            description="Slow tool",
-            tool="slow_tool",
-            params={},
-        )
-        
-        result = await executor.run(step)
-        assert result.status == "error"
-        assert "timed out" in result.result.lower()
+
+    async def slow_tool(*args, **kwargs):
+        await asyncio.sleep(1)
+        return {"status": "ok", "result": "done"}
+
+    with patch("app.tools.router.ToolRouter._execute", new=slow_tool), \
+         patch("app.tools.router.TOOL_EXECUTION_TIMEOUT_SECONDS", 0.05):
+        result = await executor.run(ToolStep(description="Slow tool", tool="kg_summary", params={}))
+
+    assert result.status == "error"
+    assert "timed out" in result.result.lower()
 
 
 # ─── Pipeline Helper Tests ────────────────────────────────────────────────────
@@ -213,12 +218,12 @@ async def test_tool_executor_timeout():
 def test_truncate_tool_result():
     """Test tool result truncation logic."""
     short_text = "Short result"
-    result = _truncate_tool_result(short_text, "test_tool")
+    result = _truncate_tool_result(short_text)
     assert result == short_text
     
     # Long text should be truncated
     long_text = "x" * 2000
-    result = _truncate_tool_result(long_text, "test_tool")
+    result = _truncate_tool_result(long_text)
     assert len(result) < len(long_text)
     assert "truncated" in result
 
@@ -323,26 +328,23 @@ def test_pipeline_constants_defined():
         TOOL_RESULT_MAX_CHARS,
         MAX_TOOL_ITERATIONS,
         TOOL_EXECUTION_TIMEOUT_SECONDS,
-        COMPLEX_TASK_TOOL_THRESHOLD,
     )
     
     assert TOOL_RESULT_MAX_CHARS == 1200
     assert MAX_TOOL_ITERATIONS == 4
     assert TOOL_EXECUTION_TIMEOUT_SECONDS == 30.0
-    assert COMPLEX_TASK_TOOL_THRESHOLD == 3
 
 
 def test_coordinator_constants_defined():
     """Test that coordinator constants are properly defined."""
     from app.agents.coordinator import (
-        MAX_STEP_RETRIES,
         TOOL_EXECUTION_TIMEOUT_SECONDS,
         PLAN_GENERATION_TIMEOUT_SECONDS,
     )
     
-    assert MAX_STEP_RETRIES == 1
     assert TOOL_EXECUTION_TIMEOUT_SECONDS == 30.0
-    assert PLAN_GENERATION_TIMEOUT_SECONDS == 25.0
+    # Raised from 25s to accommodate slower 7B models over Ollama.
+    assert PLAN_GENERATION_TIMEOUT_SECONDS == 45.0
 
 
 if __name__ == "__main__":

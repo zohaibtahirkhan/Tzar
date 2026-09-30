@@ -68,8 +68,12 @@ class MCPServer:
     _process: Optional[Any] = field(default=None, repr=False)
     _stdin: Optional[Any] = field(default=None, repr=False)
     _stdout: Optional[Any] = field(default=None, repr=False)
+    _stderr_task: Optional[Any] = field(default=None, repr=False)
     _http_session: Optional[Any] = field(default=None, repr=False)
     _next_id: int = field(default=1, repr=False)
+    # ponytail: per-server lock serialises stdio requests; add a reader task
+    # with an id→future map if concurrent tool calls ever matter.
+    _io_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 # ─── JSON-RPC helpers ─────────────────────────────────────────────────────────
@@ -118,7 +122,8 @@ class MCPRegistry:
 
     def configure_from_env(self) -> None:
         """Load server config from MCP_SERVERS env var (JSON array)."""
-        raw = os.environ.get("MCP_SERVERS", "[]")
+        from app.config import settings
+        raw = settings.mcp_servers or "[]"
         try:
             servers = json.loads(raw)
             self.configure(servers)
@@ -211,6 +216,25 @@ class MCPRegistry:
         server._process = proc
         server._stdin   = proc.stdin
         server._stdout  = proc.stdout
+
+        # stderr must be drained continuously. Many stdio servers log heavily
+        # there, and a full pipe buffer would block the child process forever.
+        async def _drain_stderr() -> None:
+            try:
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    logger.debug(
+                        "MCP '{}' stderr: {}",
+                        server.name, line.decode(errors="replace").rstrip(),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("MCP '{}' stderr reader stopped: {}", server.name, exc)
+
+        server._stderr_task = asyncio.create_task(_drain_stderr())
 
         # Initialize
         await self._stdio_request(server, "initialize", {
@@ -325,13 +349,26 @@ class MCPRegistry:
         return data.get("result", {})
 
     async def _stdio_request(self, server: MCPServer, method: str, params: dict) -> dict:
-        req_id = server._next_id
-        server._next_id += 1
-        line = json.dumps(_rpc_request(method, params, req_id)) + "\n"
-        server._stdin.write(line.encode())
-        await server._stdin.drain()
-        raw = await server._stdout.readline()
-        data = json.loads(raw.decode())
+        async with server._io_lock:
+            req_id = server._next_id
+            server._next_id += 1
+            line = json.dumps(_rpc_request(method, params, req_id)) + "\n"
+            server._stdin.write(line.encode())
+            await server._stdin.drain()
+            # Servers may emit notifications (no id) before the reply; read
+            # until the message with our id arrives. EOF means the child died.
+            while True:
+                raw = await server._stdout.readline()
+                if not raw:
+                    raise RuntimeError(f"MCP server '{server.name}' closed stdout")
+                try:
+                    data = json.loads(raw.decode())
+                except json.JSONDecodeError:
+                    logger.debug("MCP '{}': non-JSON line on stdout: {}", server.name, raw[:120])
+                    continue
+                if data.get("id") == req_id:
+                    break
+                logger.debug("MCP '{}': skipping message {}", server.name, data.get("method", data.get("id")))
         if "error" in data:
             raise RuntimeError(f"MCP error: {data['error']}")
         return data.get("result", {})
@@ -378,6 +415,13 @@ class MCPRegistry:
             try:
                 if server._http_session:
                     await server._http_session.aclose()
+                if server._stderr_task:
+                    server._stderr_task.cancel()
+                    try:
+                        await server._stderr_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    server._stderr_task = None
                 if server._process:
                     server._process.terminate()
                     await server._process.wait()

@@ -18,10 +18,11 @@ ALLOWED_EXTENSIONS = set(settings.allowed_extensions)
 
 # ─── Path Validation ──────────────────────────────────────────────────────────
 
-def _safe_path(relative_path: str) -> Path:
+def _safe_path(relative_path: str, root: Path = ALLOWED_ROOT) -> Path:
     """
-    Resolve a user-supplied relative path to an absolute path inside the
-    workspace. Raises PermissionError if the resolved path escapes the sandbox.
+    Resolve a user-supplied relative path to an absolute path inside `root`
+    (the workspace by default; the Obsidian vault reuses it). Raises
+    PermissionError if the resolved path escapes the sandbox.
     
     Security Features:
     - Prevents path traversal attacks (../, ../../, etc.)
@@ -32,20 +33,16 @@ def _safe_path(relative_path: str) -> Path:
     # Security: Remove null bytes and control characters
     relative_path = "".join(c for c in relative_path if c.isprintable() and c != '\0')
     
-    # Strip leading slashes to force relative resolution
-    relative_path = relative_path.lstrip("/")
+    # Strip leading slashes (either kind) to force relative resolution
+    relative_path = relative_path.lstrip("/\\")
     
     # Resolve to absolute path (follows symlinks)
-    candidate = (ALLOWED_ROOT / relative_path).resolve()
+    candidate = (root / relative_path).resolve()
 
-    # Critical check: Ensure resolved path is within workspace
-    # Use is_relative_to() for robust checking (Python 3.9+)
-    try:
-        candidate.relative_to(ALLOWED_ROOT)
-    except ValueError:
+    # Critical check: Ensure resolved path is within the sandbox root
+    if not candidate.is_relative_to(root):
         raise PermissionError(
-            f"Path traversal denied: '{relative_path}' resolves outside workspace. "
-            f"All operations must stay within {ALLOWED_ROOT}"
+            f"Path traversal denied: '{relative_path}' resolves outside {root}."
         )
     
     return candidate
@@ -70,15 +67,15 @@ async def tool_read_file(path: str) -> str:
         raise IsADirectoryError(f"'{path}' is a directory, not a file.")
 
     if safe.suffix.lower() == ".pdf":
-        import subprocess
-        result = subprocess.run(
-            ["pdftotext", str(safe), "-"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            return result.stdout.strip() or "[PDF has no extractable text]"
-        raise RuntimeError(f"pdftotext failed: {result.stderr}")
-    
+        # pdfplumber rather than the pdftotext binary — Poppler is not present
+        # by default on Windows or macOS.
+        from app.tools.rag.ingestor import _extract_pdf
+
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, _extract_pdf, safe)
+        return text.strip() or "[PDF has no extractable text]"
+
+
     async with aiofiles.open(safe, "r", encoding="utf-8", errors="replace") as f:
         content = await f.read()
 

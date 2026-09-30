@@ -10,7 +10,7 @@ No audio hardware is required — TTS calls are mocked.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import make_llm_response
+from tests.conftest import make_llm_response, stream_llm_response
 from app.pipeline import _parse_llm_json, SpeechMeta, AssistantPipeline
 
 
@@ -228,8 +228,7 @@ class TestConfidenceField:
 
 class TestPipelineSpeechIntegration:
     """
-    Verifies that after process_text_input, the speech meta on the
-    pipeline matches what the LLM returned.
+    Verifies that the turn result carries the speech meta the LLM returned.
     """
 
     @pytest.mark.asyncio
@@ -245,18 +244,17 @@ class TestPipelineSpeechIntegration:
 
         with patch("app.pipeline.llm_engine") as mock_llm, \
              patch("app.pipeline.memory_manager") as mock_mem, \
-             patch("app.pipeline.needs_planning", return_value=False), \
              patch("app.pipeline.log_turn", new=AsyncMock()):
 
-            mock_llm.generate = AsyncMock(return_value=llm_response)
+            mock_llm.generate_stream = stream_llm_response(llm_response)
             mock_mem.get_context = AsyncMock(return_value=("", ""))
             mock_mem.add_turn    = AsyncMock()
 
-            await pipeline.process_text_input("Read the server log file.")
+            result = await pipeline.run_turn("Read the server log file.")
 
-        assert pipeline._speech_meta.pace == 0.75
-        assert pipeline._speech_meta.pause_ms == 350
-        assert pipeline._speech_meta.tone == "informative"
+        assert result.speech.pace == 0.75
+        assert result.speech.pause_ms == 350
+        assert result.speech.tone == "informative"
 
     @pytest.mark.asyncio
     async def test_interruptible_flag_set_after_process(self):
@@ -271,13 +269,12 @@ class TestPipelineSpeechIntegration:
 
         with patch("app.pipeline.llm_engine") as mock_llm, \
              patch("app.pipeline.memory_manager") as mock_mem, \
-             patch("app.pipeline.needs_planning", return_value=False), \
              patch("app.pipeline.log_turn", new=AsyncMock()):
 
-            mock_llm.generate = AsyncMock(return_value=llm_response)
+            mock_llm.generate_stream = stream_llm_response(llm_response)
             mock_mem.get_context = AsyncMock(return_value=("", ""))
             mock_mem.add_turn    = AsyncMock()
 
-            await pipeline.process_text_input("Delete all temp files.")
+            result = await pipeline.run_turn("Delete all temp files.")
 
-        assert pipeline._interruptible is False
+        assert result.interruptible is False

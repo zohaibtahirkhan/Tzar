@@ -62,10 +62,26 @@ def skills_list() -> str:
     return "AVAILABLE SKILLS (load with skill_load):\n" + "\n".join(skills)
 
 
+# ─── Name sanitising ──────────────────────────────────────────────────────────
+
+def _safe_skill_name(name: str) -> str:
+    """
+    Reduce an LLM-supplied skill name to a single safe path segment.
+
+    Skill names reach these functions straight from tool params, and one of
+    them (skill_delete) calls shutil.rmtree — so a name like '../../..' must
+    never be allowed to address anything outside SKILLS_DIR.
+    """
+    return re.sub(r"[^a-z0-9\-_]", "-", str(name).lower()).strip("-")
+
+
 # ─── Load ─────────────────────────────────────────────────────────────────────
 
 def skill_load(name: str) -> str:
     """Load and return full skill content for injection into the prompt."""
+    name = _safe_skill_name(name)
+    if not name:
+        return "Invalid skill name."
     skill_dir = SKILLS_DIR / name
     skill_md  = skill_dir / "SKILL.md"
 
@@ -89,7 +105,9 @@ def skill_create(name: str, description: str, content: str, category: str = "gen
     description: one sentence shown in the skill index
     content: full SKILL.md body (procedure, pitfalls, examples)
     """
-    name = re.sub(r"[^a-z0-9\-_]", "-", name.lower()).strip("-")
+    name = _safe_skill_name(name)
+    if not name:
+        return "Invalid skill name."
     skill_dir = SKILLS_DIR / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md  = skill_dir / "SKILL.md"
@@ -118,6 +136,9 @@ def skill_update(name: str, old_text: str, new_text: str) -> str:
     Patch a skill — surgical replacement, preferred over full rewrite.
     old_text must appear exactly once in the skill.
     """
+    name = _safe_skill_name(name)
+    if not name:
+        return "Invalid skill name."
     skill_md = SKILLS_DIR / name / "SKILL.md"
     if not skill_md.exists():
         return f"Skill '{name}' not found."
@@ -138,6 +159,9 @@ def skill_update(name: str, old_text: str, new_text: str) -> str:
 
 def skill_rewrite(name: str, description: str, content: str) -> str:
     """Full rewrite of a skill (when patch isn't enough)."""
+    name = _safe_skill_name(name)
+    if not name:
+        return "Invalid skill name."
     skill_md = SKILLS_DIR / name / "SKILL.md"
     if not skill_md.exists():
         return f"Skill '{name}' not found."
@@ -166,6 +190,9 @@ def skill_rewrite(name: str, description: str, content: str) -> str:
 def skill_delete(name: str) -> str:
     """Delete a skill entirely."""
     import shutil
+    name = _safe_skill_name(name)
+    if not name:
+        return "Invalid skill name."
     skill_dir = SKILLS_DIR / name
     if not skill_dir.exists():
         return f"Skill '{name}' not found."

@@ -7,6 +7,8 @@ Swap LLM_MODEL in config to change models with zero code changes.
 """
 import asyncio
 import json
+import re
+import threading
 from typing import AsyncIterator, Optional
 import time
 
@@ -16,27 +18,59 @@ from loguru import logger
 from app.config import settings
 
 
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\n?|```$", re.MULTILINE)
+
+# Text the model must never continue past: fake conversation turns.
+STOP_SEQUENCES = ["User:", "Human:", "\nUser:", "\nHuman:"]
+
+
+def parse_json_object(raw: str) -> Optional[dict]:
+    """
+    Best-effort JSON object from LLM output: strips markdown fences, takes the
+    outermost {...}, parses it. None when there is no valid object — callers
+    decide what to salvage. Every prompt in this app asks for a JSON object,
+    so this is the one place that reads model output.
+    """
+    clean = _FENCE_RE.sub("", (raw or "").strip()).strip()
+    m = re.search(r"\{.*\}", clean, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group())
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+class LLMUnavailableError(RuntimeError):
+    """The backend can't answer at all (Ollama down, model not pulled). The message says how to fix it."""
+
+
 class LLMEngine:
     def __init__(self):
         # Use semaphore instead of lock to allow controlled concurrent access
         # For CPU: limit=1, for GPU: limit=num_gpu_cores
         self._semaphore = asyncio.Semaphore(1)  # CPU-only: 1 concurrent inference
-        self._client: Optional[httpx.AsyncClient] = None
         self._llm = None
         self._base_url = settings.LLM_OLLAMA_HOST
         self._model = settings.llm_model
         logger.info("Using Ollama URL: {}", self._base_url)
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self._base_url,
-                timeout=httpx.Timeout(60.0, connect=5.0)
-            )
-        return self._client
-
     def load(self) -> None:
         """Load the model synchronously (call once at startup)."""
+        # Skip load for Ollama backend (uses HTTP API instead)
+        if settings.LLM_BACKEND == "ollama":
+            # Nothing to load; report now so a first-run user sees the fix in the log.
+            # Not fatal: Ollama may be started after the assistant.
+            problem = self.ollama_problem()
+            if problem:
+                logger.warning("Ollama not ready: {}", problem)
+            else:
+                logger.info("Ollama ready: {} at {}", self._model, self._base_url)
+            self._ollama_available = True
+            return
+        
+        # llamacpp backend - load model file
         model_path = str(settings.llm_model_path)
         if not settings.llm_model_path.exists():
             logger.error(
@@ -56,7 +90,7 @@ class LLMEngine:
                 model_path=model_path,
                 n_ctx=settings.llm_context_length,
                 n_threads=settings.llm_threads,
-                n_gpu_layers=0,          # CPU-only
+                n_gpu_layers=settings.llm_n_gpu_layers,
                 verbose=False,
                 use_mlock=True,          # keep model in RAM
                 use_mmap=True,
@@ -66,23 +100,25 @@ class LLMEngine:
                 "llama-cpp-python is not installed. Run: pip install llama-cpp-python"
             )
             
-    async def health_check(self) -> bool:
-        """Returns True if Ollama is running and the model is available."""
+    def _not_running(self) -> str:
+        return f"I can't reach Ollama at {self._base_url}. Start it with: ollama serve"
+
+    def _not_pulled(self) -> str:
+        return f"The model {self._model} isn't downloaded. Run: ollama pull {self._model}"
+
+    def ollama_problem(self) -> Optional[str]:
+        """None when Ollama is up and the model is pulled; otherwise what the user should do. Blocking."""
         try:
-            client = await self._get_client()
-            r = await client.get("/api/tags")
-            models = [m["name"] for m in r.json().get("models", [])]
-            available = any(self._model in m for m in models)
-            if not available:
-                logger.warning(
-                    "Model '{}' not found in Ollama. Run: ollama pull {}",
-                    self._model, self._model
-                )
-            self._ollama_available = True
-            return available
-        except Exception as e:
-            logger.error("Ollama health check failed: {}", e)
-            return False
+            r = httpx.get(f"{self._base_url}/api/tags", timeout=3.0)
+            r.raise_for_status()
+            names = {m.get("name") for m in r.json().get("models", [])}
+        except Exception as exc:
+            logger.debug("Ollama check failed: {}", exc)
+            return self._not_running()
+        # Ollama stores an untagged name as "<name>:latest".
+        if self._model not in names and f"{self._model}:latest" not in names:
+            return self._not_pulled()
+        return None
 
     def is_loaded(self) -> bool:
         """Check if LLM has been loaded successfully."""
@@ -113,8 +149,15 @@ class LLMEngine:
         If the generator is abandoned mid-stream (caller breaks or throws),
         aclose() on the generator will release the lock via the finally block.
         """
-        if self._llm is None:
-            raise RuntimeError("LLM not loaded. Call load() first.")
+        # ── Backend-specific check ──
+        if settings.LLM_BACKEND == "ollama":
+            if not getattr(self, "_ollama_available", False):
+                raise RuntimeError("Ollama not available. Check service is running.")
+        elif settings.LLM_BACKEND == "llamacpp":
+            if self._llm is None:
+                raise RuntimeError("LLM not loaded. Call load() first.")
+        else:
+            raise RuntimeError(f"Unknown backend: {settings.LLM_BACKEND}")
  
         # ── Token budget guard: prevent context overflow before calling llamacpp ──
         def _token_budget_guard(system_prompt: str, messages: list, max_tokens: int) -> list:
@@ -180,11 +223,78 @@ class LLMEngine:
         
         messages = _token_budget_guard(system_prompt, messages, max_tokens)
  
+        # ── Ollama Backend: HTTP streaming ───────────────────────────────────
+        if settings.LLM_BACKEND == "ollama":
+            async with self._semaphore:
+                try:
+                    logger.info("Ollama: creating fresh client...")
+                    # Use fresh client each time with proper timeout for model loading
+                    timeout = httpx.Timeout(180.0, connect=10.0, read=180.0)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        full_messages = [{"role": "system", "content": system_prompt}] + messages
+                        
+                        payload = {
+                            "model": self._model,
+                            "messages": full_messages,
+                            "stream": True,
+                            "options": {
+                                # Without this Ollama uses its own default (4096) and
+                                # silently drops the start of the prompt — the system
+                                # prompt — while the budget guard above assumes our value.
+                                "num_ctx": settings.llm_context_length,
+                                "temperature": temperature,
+                                "num_predict": max_tokens,
+                                "top_p": settings.llm_top_p,
+                                "repeat_penalty": settings.llm_repeat_penalty,
+                                "stop": STOP_SEQUENCES,
+                            }
+                        }
+                        
+                        logger.info("Ollama: starting stream request...")
+                        logger.debug(f"URL: {self._base_url}/api/chat")
+                        logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+                        
+                        async with client.stream("POST", f"{self._base_url}/api/chat", json=payload) as response:
+                            logger.info(f"Ollama: entered stream context")
+                            logger.info(f"Ollama: got response status {response.status_code}")
+                            if response.status_code == 404:
+                                raise LLMUnavailableError(self._not_pulled())
+                            response.raise_for_status()
+                            
+                            logger.info("Ollama: reading text...")
+                            # aiter_lines() reassembles JSON lines split across
+                            # HTTP chunks; aiter_text() + split() dropped those tokens.
+                            async for line in response.aiter_lines():
+                                if not line.strip():
+                                    continue
+                                try:
+                                    chunk = json.loads(line)
+                                except json.JSONDecodeError:
+                                    logger.warning("Ollama: skipping unparseable line: {}", line[:120])
+                                    continue
+                                if chunk.get("error"):      # e.g. out of memory loading the model
+                                    raise LLMUnavailableError(f"Ollama error: {chunk['error']}")
+                                token = chunk.get("message", {}).get("content")
+                                if token:
+                                    yield token
+                                if chunk.get("done", False):
+                                    logger.info("Ollama: stream done")
+                                    break
+                except LLMUnavailableError:
+                    raise
+                except httpx.ConnectError as exc:
+                    raise LLMUnavailableError(self._not_running()) from exc
+                except Exception as exc:
+                    logger.error("Ollama streaming error: {} - {}", type(exc).__name__, exc)
+                return  # Exit early for Ollama
+
+        # ── LlamaCPP Backend: Thread-based streaming ─────────────────────────
         full_messages = [{"role": "system", "content": system_prompt}] + messages
- 
-        loop   = asyncio.get_event_loop()
+
+        loop   = asyncio.get_running_loop()
         queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
- 
+        abandoned = threading.Event()
+
         def _run_inference():
             try:
                 stream = self._llm.create_chat_completion(
@@ -194,9 +304,11 @@ class LLMEngine:
                     top_p=settings.llm_top_p,
                     repeat_penalty=settings.llm_repeat_penalty,
                     stream=True,
-                    stop=["User:", "Human:", "\nUser:", "\nHuman:"],
+                    stop=STOP_SEQUENCES,
                 )
                 for chunk in stream:
+                    if abandoned.is_set():
+                        break
                     delta = chunk["choices"][0]["delta"]
                     token = delta.get("content", "")
                     if token:
@@ -205,24 +317,25 @@ class LLMEngine:
                 logger.error("LLM inference error: {}", exc)
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)   # sentinel
- 
-        # ── Use semaphore for controlled concurrent access ──────────────────
-        # Semaphore allows N concurrent inferences (configurable)
-        # Using async context manager ensures release even if:
-        #   - the caller abandons the generator (aclose())
-        #   - _run_inference raises
-        #   - queue.get() raises
-        async with self._semaphore:
-            await loop.run_in_executor(None, _run_inference)
- 
-            t_first = None
-            while True:
-                token = await queue.get()
-                if token is None:
-                    break
-                if t_first is None:
-                    t_first = time.perf_counter()
-                yield token
+
+        # One inference at a time: concurrent llama.cpp calls crash it.
+        try:
+            async with self._semaphore:
+                inference_task = loop.run_in_executor(None, _run_inference)
+                try:
+                    while True:
+                        token = await queue.get()
+                        if token is None:
+                            break
+                        yield token
+                finally:
+                    # A cancelled or abandoned caller must not release the
+                    # semaphore while the thread is still generating — the next
+                    # call would run concurrently. Stop it and wait for it.
+                    abandoned.set()
+                    await asyncio.shield(inference_task)
+        except Exception as exc:
+            logger.error("LlamaCPP streaming error: {}", exc)
 
     async def generate(
         self,
@@ -240,7 +353,7 @@ class LLMEngine:
         except Exception as exc:
             logger.error("generate() error: {}", exc)
         return "".join(parts)   # always a str, even if empty
- 
+
     async def generate_safe(
         self,
         messages: list[dict],
@@ -249,25 +362,15 @@ class LLMEngine:
         timeout: float = 60.0,
     ) -> str:
         """
-        Timeout-protected generate(). Never raises. Returns "" on any failure.
-        Used by Coordinator and Critic to prevent segfaults on concurrent calls.
+        Timeout-protected generate(). Returns "" on timeout; generate() itself
+        never raises. wait_for() cancels and awaits the stream, which holds the
+        semaphore until inference has stopped, so no settle delay is needed.
         """
         try:
-            result = await asyncio.wait_for(
-                self.generate(messages, system_prompt, max_tokens),
-                timeout=timeout,
-            )
-            return result or ""
+            return await asyncio.wait_for(self.generate(messages, system_prompt, max_tokens), timeout) or ""
         except asyncio.TimeoutError:
             logger.error("generate_safe() timed out after {}s", timeout)
             return ""
-        except Exception as exc:
-            logger.error("generate_safe() error: {}", exc)
-            return ""
-
-    async def close(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
 
 
 # Module-level singleton

@@ -11,7 +11,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from tests.conftest import make_llm_response, make_plan_response
+from tests.conftest import make_llm_response, stream_llm_response, make_plan_response
 
 
 # ─── 4.1  Complexity classifier ──────────────────────────────────────────────
@@ -190,21 +190,23 @@ class TestPlannerPipelineIntegration:
 
     @pytest.mark.asyncio
     async def test_planner_called_for_complex_input(self):
-        """Pipeline should call make_plan when intent is PLANNING."""
+        """Pipeline should call make_plan when capabilities include planning."""
         from app.pipeline import AssistantPipeline
         from app.planner import Plan
-        from app.intent import IntentType
+        from app.intent import Capabilities
 
         pipeline = AssistantPipeline()
         simple_plan = Plan(can_answer_directly=False, goal="test", steps=["search", "create note"])
 
-        with patch("app.pipeline.classify_intent", return_value=IntentType.PLANNING) as mock_intent, \
+        # The pipeline routes on the multi-label classify() API, not the legacy
+        # single-label classify_intent().
+        with patch("app.pipeline.classify", return_value=Capabilities(needs_planning=True)) as mock_caps, \
              patch("app.pipeline.make_plan", new=AsyncMock(return_value=simple_plan)) as mock_plan, \
              patch("app.pipeline.llm_engine") as mock_llm, \
              patch("app.pipeline.memory_manager") as mock_mem, \
              patch("app.memory.projects.extract_project_name_from_query", return_value=None):
 
-            mock_llm.generate = AsyncMock(return_value=make_llm_response(response="Done."))
+            mock_llm.generate_stream = stream_llm_response(make_llm_response(response="Done."))
             mock_mem.get_context = AsyncMock(return_value=("", ""))
             mock_mem.add_turn    = AsyncMock()
 
@@ -213,31 +215,32 @@ class TestPlannerPipelineIntegration:
                     "Find the latest Snowflake release and create a note and link it."
                 )
 
-            mock_intent.assert_called_once()
+            mock_caps.assert_called()
             mock_plan.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_planner_skipped_for_simple_input(self):
-        """Pipeline should NOT call make_plan for CHAT intent."""
+        """Pipeline should NOT call make_plan for plain chat."""
         from app.pipeline import AssistantPipeline
-        from app.intent import IntentType
+        from app.intent import Capabilities
 
         pipeline = AssistantPipeline()
 
-        with patch("app.pipeline.classify_intent", return_value=IntentType.CHAT) as mock_intent, \
+        # No capability flags set → "chat" → planner must not run.
+        with patch("app.pipeline.classify", return_value=Capabilities()) as mock_caps, \
              patch("app.pipeline.make_plan", new=AsyncMock()) as mock_plan, \
              patch("app.pipeline.llm_engine") as mock_llm, \
              patch("app.pipeline.memory_manager") as mock_mem, \
              patch("app.memory.projects.extract_project_name_from_query", return_value=None):
 
-            mock_llm.generate = AsyncMock(return_value=make_llm_response(response="Twenty-five."))
+            mock_llm.generate_stream = stream_llm_response(make_llm_response(response="Twenty-five."))
             mock_mem.get_context = AsyncMock(return_value=("", ""))
             mock_mem.add_turn    = AsyncMock()
 
             with patch("app.pipeline.log_turn", new=AsyncMock()):
                 await pipeline.process_text_input("What is 5 times 5?")
 
-            mock_intent.assert_called_once()
+            mock_caps.assert_called()
             mock_plan.assert_not_called()
 
 

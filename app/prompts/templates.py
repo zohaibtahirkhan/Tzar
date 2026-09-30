@@ -1,17 +1,17 @@
 SYSTEM_PROMPT = """You are a local voice assistant. You MUST respond in JSON only. No prose outside JSON.
 
-RESPONSE FORMAT:
+RESPONSE FORMAT (keep the keys in this order — response comes last):
 {{
   "tool": null,
   "tool_params": null,
-  "response": "what to say to the user",
-  "confidence": 0.9,
-  "interruptible": true,
   "speech": {{
     "pace": 1.0,
     "clause_pause_ms": 120,
     "tone": "neutral"
-  }}
+  }},
+  "confidence": 0.9,
+  "interruptible": true,
+  "response": "what to say to the user"
 }}
 
 CRITICAL: You MUST output ONLY a single JSON object. 
@@ -143,11 +143,7 @@ AVAILABLE TOOLS:
   the best LLM, quantisation, STT model, GPU settings, and .env config.
   Use when the user asks "what model should I use", "is my hardware good enough",
   "what can my computer run", "suggest a model for me", or similar.
-  
-NOTE — Research Agent: When the user asks to "research X", "investigate X", "what's new in X", or
-"compare X vs Y", the pipeline automatically invokes the Research Agent before you respond. You will
-receive the research summary as part of your context. Synthesise it naturally in your spoken response.
-Do NOT try to call web_search yourself for these requests — the agent already did it.
+
 - ALWAYS output valid JSON. Nothing else.
 - thought is private. Never spoken.
 - response must be natural spoken language. No markdown. No bullet points.
@@ -208,15 +204,29 @@ KNOWLEDGE GRAPH RULES:
 {memory_context}
 """
 
-def build_system_prompt(memory_context: str = "", conversation_history: str = "", plan_context: str = "") -> str:
+CITE_INSTRUCTION = "say which note or document the answer came from, by its title"
+
+
+def build_system_prompt(
+    memory_context: str = "",
+    conversation_history: str = "",
+    plan_context: str = "",
+    retrieval_context: str = "",
+) -> str:
     from app.memory.hot_memory import hot_memory_for_prompt
     from app.memory.skills import skills_list
+    from app.memory.projects import get_active_project_context
     hot         = hot_memory_for_prompt()
     skill_index = skills_list()
+    project     = get_active_project_context()
     mem  = f"RECALLED MEMORIES:\n{memory_context}" if memory_context and memory_context not in ("No stored memories yet.", "No relevant memories found.") else ""
     hist = f"CONVERSATION SO FAR:\n{conversation_history}" if conversation_history and conversation_history != "No prior conversation." else ""
     plan = plan_context if plan_context else ""
-    context_block = "\n\n".join(filter(None, [hot, skill_index, mem, hist, plan]))
+    rag  = (
+        f"RETRIEVED FROM YOUR NOTES AND DOCUMENTS (answer from these, and {CITE_INSTRUCTION}):\n"
+        f"{retrieval_context}"
+    ) if retrieval_context else ""
+    context_block = "\n\n".join(filter(None, [hot, skill_index, project, mem, hist, plan, rag]))
     return SYSTEM_PROMPT.format(memory_context=context_block)
     
 

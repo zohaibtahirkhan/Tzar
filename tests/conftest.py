@@ -5,8 +5,10 @@ All LLM calls are mocked — tests run entirely offline with no models loaded.
 The mock LLM is controlled per-test via the `llm_response` fixture parameter.
 """
 import asyncio
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -19,7 +21,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── Prevent real model loading at import time ─────────────────────────────────
 os.environ.setdefault("LLM_MODEL_PATH", "models/fake.gguf")
-os.environ.setdefault("OBSIDIAN_VAULT_PATH", "/tmp/fake_vault")
+
+# ── Keep every DB / vault / workspace write out of the real data/ directory ───
+# Modules capture these paths from settings at import time, so they must be set
+# before anything under app/ is imported. Per-test fixtures still narrow further.
+_SESSION_DATA = Path(tempfile.mkdtemp(prefix="tzar-tests-"))
+atexit.register(shutil.rmtree, _SESSION_DATA, ignore_errors=True)
+for _key, _sub in {
+    "DATA_DIR":            "data",
+    "LOG_DIR":             "data/logs",
+    "WORKSPACE_DIR":       "workspace",
+    "MEMORY_DB":           "data/memory.db",
+    "KG_DB":               "data/knowledge_graph.db",
+    "PROJECTS_DB":         "data/projects.db",
+    "OBSIDIAN_VECTOR_DB":  "data/obsidian_vectors.db",
+    "OBSIDIAN_VAULT_PATH": "vault",
+}.items():
+    os.environ.setdefault(_key, str(_SESSION_DATA / _sub))
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -38,15 +56,36 @@ def make_llm_response(
     return json.dumps({
         "tool": tool,
         "tool_params": tool_params,
-        "response": response,
-        "confidence": confidence,
-        "interruptible": interruptible,
         "speech": {
             "pace": pace,
             "clause_pause_ms": pause_ms,
             "tone": tone,
         },
+        "confidence": confidence,
+        "interruptible": interruptible,
+        "response": response,          # last, as the prompt asks — lets TTS start early
     })
+
+
+def stream_llm_response(*replies: str, chunk_size: int = 7):
+    """
+    Stand-in for llm_engine.generate_stream: each call serves the next reply
+    in small pieces, the way tokens arrive from a real model. Wrap it in
+    MagicMock(side_effect=...) to also record the messages each call received.
+    """
+    queue = list(replies)
+
+    async def _gen(*args, **kwargs):
+        text = queue.pop(0)
+        for i in range(0, len(text), chunk_size):
+            yield text[i:i + chunk_size]
+    return _gen
+
+
+def stub_memory(mock_mem) -> None:
+    """Quiet memory manager: no context, no writes."""
+    mock_mem.get_context = AsyncMock(return_value=("", ""))
+    mock_mem.add_turn = AsyncMock()
 
 
 def make_curator_response(action: str = "store", target: str = "user",
@@ -94,15 +133,23 @@ def tmp_vault(tmp_path):
 
 
 @pytest.fixture
-def mock_llm():
+def pipeline_mocks():
     """
-    Mock LLM engine. Set mock_llm.generate.return_value to control responses.
-    Supports both .generate() and .generate_stream() (returns full string).
+    Everything a pipeline turn touches outside its own logic, mocked: yields the
+    LLM mock so a test can script replies with
+    `mock_llm.generate_stream = stream_llm_response(reply, ...)`.
     """
-    engine = MagicMock()
-    engine.generate = AsyncMock(return_value=make_llm_response())
-    engine.generate_stream = AsyncMock(return_value=make_llm_response())
-    return engine
+    with patch("app.pipeline.llm_engine") as mock_llm, \
+         patch("app.pipeline.memory_manager") as mock_mem, \
+         patch("app.pipeline.log_turn", new=AsyncMock()), \
+         patch("app.pipeline.build_system_prompt", return_value="SYSTEM"), \
+         patch("app.pipeline.response_cache") as cache:
+        stub_memory(mock_mem)
+        cache.get = AsyncMock(return_value=None)
+        cache.set = AsyncMock()
+        cache.clear = AsyncMock()
+        mock_llm.generate_stream = stream_llm_response(make_llm_response())
+        yield mock_llm
 
 
 @pytest.fixture

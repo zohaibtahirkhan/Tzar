@@ -64,14 +64,15 @@ from app.config import settings
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-WEIGHT_IMPORTANCE = 0.45
-WEIGHT_RECENCY    = 0.30
-WEIGHT_CONFIDENCE = 0.15
-WEIGHT_FREQUENCY  = 0.10
+# All tunables come from settings (.env) so the README's "configurable" claim is true.
+WEIGHT_IMPORTANCE = settings.memory_score_weight_importance
+WEIGHT_RECENCY    = settings.memory_score_weight_recency
+WEIGHT_CONFIDENCE = settings.memory_score_weight_confidence
+WEIGHT_FREQUENCY  = settings.memory_score_weight_frequency
 
-RECENCY_HALF_LIFE_DAYS = 14.0   # score halves every 14 days
-PRUNE_THRESHOLD        = 0.08   # memories below this composite score get pruned
-PRUNE_MIN_AGE_DAYS     = 7      # never prune a memory younger than this
+RECENCY_HALF_LIFE_DAYS = settings.memory_recency_half_life_days   # score halves every N days
+PRUNE_THRESHOLD        = settings.memory_prune_threshold          # composite below this gets pruned
+PRUNE_MIN_AGE_DAYS     = settings.memory_prune_min_age_days       # never prune younger than this
 
 
 # ─── Importance heuristics (rule-based, no LLM needed) ───────────────────────

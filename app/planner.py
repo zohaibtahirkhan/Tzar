@@ -15,8 +15,6 @@ Architecture:
     ↓
   Pipeline executes steps in order, with plan in context
 """
-import json
-import re
 from dataclasses import dataclass, field
 from loguru import logger
 
@@ -98,21 +96,17 @@ class Plan:
 
 
 def _parse_plan_json(raw: str) -> Plan:
-    clean = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-    match = re.search(r"\{.*\}", clean, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group())
-            return Plan(
-                goal=data.get("goal", ""),
-                complexity=data.get("complexity", "low"),
-                steps=data.get("steps", []),
-                required_tools=data.get("required_tools", []),
-                can_answer_directly=data.get("can_answer_directly", False),
-            )
-        except json.JSONDecodeError:
-            pass
-    return Plan()  # empty plan = skip planning, proceed normally
+    from app.llm.engine import parse_json_object
+    data = parse_json_object(raw)
+    if data is None:
+        return Plan()  # empty plan = skip planning, proceed normally
+    return Plan(
+        goal=data.get("goal", ""),
+        complexity=data.get("complexity", "low"),
+        steps=data.get("steps", []),
+        required_tools=data.get("required_tools", []),
+        can_answer_directly=data.get("can_answer_directly", False),
+    )
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────

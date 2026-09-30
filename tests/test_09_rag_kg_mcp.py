@@ -315,9 +315,9 @@ class TestTokeniser:
 
 @pytest.fixture
 def kg_db(tmp_path, monkeypatch):
-    """Patch _KG_DB to use a temp file for each test."""
+    """Patch KG_DB_PATH to use a temp file for each test."""
     db = tmp_path / "test_kg.db"
-    monkeypatch.setattr("app.tools.knowledge_graph._KG_DB", db)
+    monkeypatch.setattr("app.tools.knowledge_graph.KG_DB_PATH", db)
     return db
 
 
@@ -510,17 +510,21 @@ class TestMCPRegistryConfig:
 
     def test_configure_from_env_valid_json(self, monkeypatch):
         servers = [{"name": "test", "transport": "http", "url": "http://localhost/mcp"}]
-        monkeypatch.setenv("MCP_SERVERS", json.dumps(servers))
+        # MCP_SERVERS reaches the app through Settings (.env), not raw os.environ.
+        from app.config import settings
+        monkeypatch.setattr(settings, "mcp_servers", json.dumps(servers))
         self.registry.configure_from_env()
         assert "test" in self.registry._servers
 
     def test_configure_from_env_invalid_json(self, monkeypatch):
-        monkeypatch.setenv("MCP_SERVERS", "not-valid-json")
+        from app.config import settings
+        monkeypatch.setattr(settings, "mcp_servers", "not-valid-json")
         self.registry.configure_from_env()   # should not raise
         assert len(self.registry._servers) == 0
 
     def test_configure_from_env_empty(self, monkeypatch):
-        monkeypatch.setenv("MCP_SERVERS", "[]")
+        from app.config import settings
+        monkeypatch.setattr(settings, "mcp_servers", "[]")
         self.registry.configure_from_env()
         assert len(self.registry._servers) == 0
 

@@ -69,8 +69,8 @@ from app.config import settings
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-PATTERN_THRESHOLD = 3        # seen N times → propose as skill
-MIN_SEQUENCE_LEN  = 2        # single-tool sequences are too trivial
+PATTERN_THRESHOLD = settings.skill_pattern_threshold   # seen N times → propose as skill
+MIN_SEQUENCE_LEN  = settings.skill_min_sequence_len    # single-tool sequences are too trivial
 MAX_SEQUENCE_LEN  = 8        # cap to avoid over-specific skills
 
 # Tools that are too noisy / common to form meaningful skills alone
@@ -199,7 +199,7 @@ class SkillLearner:
         Record a tool sequence after successful execution.
         Automatically checks if it should be proposed as a skill.
         """
-        if outcome != "success":
+        if outcome != "success" or not settings.skill_learning_enabled:
             return
 
         tools = _normalise(tool_sequence)

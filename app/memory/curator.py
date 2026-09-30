@@ -7,8 +7,6 @@ The Curator decides: store, reject, or consolidate.
 This separation means the main LLM never writes to memory directly.
 Every candidate passes through a focused evaluation prompt first.
 """
-import json
-import re
 from loguru import logger
 
 
@@ -55,14 +53,8 @@ RULES:
 
 
 def _parse_curator_json(raw: str) -> dict:
-    clean = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-    match = re.search(r"\{.*\}", clean, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return {"action": "reject", "reason": "curator parse error"}
+    from app.llm.engine import parse_json_object
+    return parse_json_object(raw) or {"action": "reject", "reason": "curator parse error"}
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────

@@ -1,0 +1,15 @@
+# =============================================================================
+# Development override — live-reloads the API server from the mounted source.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# =============================================================================
+
+services:
+  tzar:
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./requirements.txt:/app/requirements.txt
+    command: >
+      sh -c "pip install -r requirements.txt &&
+             uvicorn app.router:app --reload --host 0.0.0.0 --port 8000"

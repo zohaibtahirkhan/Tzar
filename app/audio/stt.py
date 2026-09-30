@@ -48,12 +48,9 @@ class STTEngine:
             raise RuntimeError("STT model not loaded.")
 
         t0 = time.perf_counter()
-        if settings.stt_language == '':
-            settings.stt_language = 'en'
-        
         segments, info = self._model.transcribe(
             audio_array,
-            language=settings.stt_language,
+            language=settings.stt_language,   # None = auto-detect
             beam_size=settings.stt_beam_size,
             vad_filter=settings.stt_vad_filter,
         )

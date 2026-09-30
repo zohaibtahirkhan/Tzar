@@ -25,6 +25,7 @@ import numpy as np
 from loguru import logger
 
 from app.config import settings
+from app.tools.rag.citations import Source, record_sources
 
 # Public alias — monkeypatched by tests via:
 #   monkeypatch.setattr(obs, "VAULT_PATH", tmp_vault)
@@ -40,8 +41,18 @@ def _vault() -> Path:
     return p
 
 
+def _vault_subpath(*parts: str) -> Path:
+    """
+    Resolve a vault-relative path from tool params, refusing anything that
+    escapes the vault — folder and project names are LLM output. Same sandbox
+    rule as the workspace filesystem tools.
+    """
+    from app.tools.filesystem import _safe_path
+    return _safe_path("/".join(p for p in parts if p), root=_vault().resolve())
+
+
 def _folder(name: str) -> Path:
-    p = _vault() / name
+    p = _vault_subpath(name)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -114,19 +125,22 @@ tags: [{", ".join(tags)}]
     path = _note_path(folder, title)
 
     # Don't overwrite — append with timestamp if exists
-    if path.exists():
+    appended = path.exists()
+    if appended:
         async with aiofiles.open(path, "a", encoding="utf-8") as f:
             await f.write(f"\n\n---\n*Updated {now}*\n\n{content}\n")
         logger.info("Obsidian: appended to existing note '{}'", title)
-        return f"Updated existing note: {title}"
+    else:
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(frontmatter + body)
+        logger.info("Obsidian: created note '{}' in {}", title, folder)
 
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        await f.write(frontmatter + body)
-
-    logger.info("Obsidian: created note '{}' in {}", title, folder)
-
-    # Index for semantic search
-    await _index_note(str(path), title, frontmatter + body)
+    # Index for semantic search. Read the file back so an appended update is
+    # indexed against the note's full current text, not just the new fragment —
+    # otherwise updates stay invisible to obsidian_search forever.
+    async with aiofiles.open(path, "r", encoding="utf-8", errors="replace") as f:
+        full_text = await f.read()
+    await _index_note(str(path), title, full_text)
 
     # Auto-extract backlinks as graph edges
     from app.tools.knowledge_graph import kg_add_from_note
@@ -138,7 +152,9 @@ tags: [{", ".join(tags)}]
     if settings.kg_auto_extract:
         from app.tools.knowledge_graph import kg_extract_and_index
         await kg_extract_and_index(body, source_note=title)
-        
+
+    if appended:
+        return f"Updated existing note: {title}"
     return f"Note created: {title} (in {folder}/)"
 
 
@@ -211,7 +227,11 @@ async def obsidian_capture_idea(raw_thought: str, structured: str = "") -> str:
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(header + entry)
 
-    await _index_note(str(path), f"Ideas {today}", entry)
+    # Index the whole day's file, not just this entry — the embedding is keyed
+    # by path, so indexing the fragment would overwrite and hide earlier ideas.
+    async with aiofiles.open(path, "r", encoding="utf-8", errors="replace") as f:
+        full_text = await f.read()
+    await _index_note(str(path), f"Ideas {today}", full_text)
     logger.info("Obsidian: idea captured")
     return f"Idea captured in Ideas/{today}"
 
@@ -250,40 +270,62 @@ def _get_vector_db() -> sqlite3.Connection:
     return conn
 
 
-async def _index_note(path: str, title: str, content: str) -> None:
-    """Index a note's embedding for semantic search."""
+async def _index_note(path: str, title: str, content: str) -> bool:
+    """
+    Index a note's embedding for semantic search.
+    Returns True if the note was (re)embedded, False if its content was
+    unchanged since the last index or no embedding model is available.
+    """
     model = _get_embed_model()
     if model is None:
-        return
+        return False
 
     content_hash = hashlib.md5(content.encode()).hexdigest()
 
     loop = asyncio.get_running_loop()
 
-    def _do_index():
+    def _do_index() -> bool:
         conn = _get_vector_db()
-        # Skip if already indexed with same content
-        row = conn.execute(
-            "SELECT content_hash FROM note_vectors WHERE path = ?", (path,)
-        ).fetchone()
-        if row and row[0] == content_hash:
+        try:
+            # Skip if already indexed with same content
+            row = conn.execute(
+                "SELECT content_hash FROM note_vectors WHERE path = ?", (path,)
+            ).fetchone()
+            if row and row[0] == content_hash:
+                return False
+
+            # Embed first 512 words for speed
+            snippet = " ".join(content.split()[:512])
+            embedding = model.encode(snippet, normalize_embeddings=True)
+            blob = embedding.astype(np.float32).tobytes()
+
+            conn.execute(
+                """INSERT OR REPLACE INTO note_vectors (path, title, content_hash, embedding)
+                   VALUES (?, ?, ?, ?)""",
+                (path, title, content_hash, blob),
+            )
+            conn.commit()
+            return True
+        finally:
             conn.close()
-            return
 
-        # Embed first 512 words for speed
-        snippet = " ".join(content.split()[:512])
-        embedding = model.encode(snippet, normalize_embeddings=True)
-        blob = embedding.astype(np.float32).tobytes()
+    return await loop.run_in_executor(None, _do_index)
 
-        conn.execute(
-            """INSERT OR REPLACE INTO note_vectors (path, title, content_hash, embedding)
-               VALUES (?, ?, ?, ?)""",
-            (path, title, content_hash, blob),
-        )
-        conn.commit()
-        conn.close()
 
-    await loop.run_in_executor(None, _do_index)
+async def _remove_note_from_index(path: str) -> bool:
+    """Drop a note's embedding (the file was deleted or moved). True if a row was removed."""
+    loop = asyncio.get_running_loop()
+
+    def _do_remove() -> bool:
+        conn = _get_vector_db()
+        try:
+            cur = conn.execute("DELETE FROM note_vectors WHERE path = ?", (path,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    return await loop.run_in_executor(None, _do_remove)
 
 
 async def obsidian_semantic_search(query: str, top_k: int = 5) -> str:
@@ -324,10 +366,12 @@ async def obsidian_semantic_search(query: str, top_k: int = 5) -> str:
     if not results:
         return "No notes found matching that query."
 
-    lines = []
+    lines, sources = [], []
     for score, title, path in results:
         rel = Path(path).relative_to(_vault()) if Path(path).is_relative_to(_vault()) else Path(path).name
         lines.append(f"[[{title}]] ({rel}) — relevance: {score:.2f}")
+        sources.append(Source(title, str(rel), "note"))
+    record_sources(sources)
 
     return "Semantically related notes:\n" + "\n".join(lines)
 
@@ -360,6 +404,7 @@ async def obsidian_keyword_search(query: str) -> str:
     if not results:
         return f"No notes found containing '{query}'."
 
+    record_sources(Source(title, path, "note") for title, path, _ in results)
     lines = [f"[[{title}]] ({path}): ...{snippet}..." for title, path, snippet in results]
     return "Notes matching '{}':\n".format(query) + "\n".join(lines)
 
@@ -427,12 +472,17 @@ async def obsidian_get_project_context(project_name: str) -> str:
     Used for 'continue working on X' type requests.
     """
     vault = _vault()
-    project_folder = vault / settings.obsidian_projects_folder / project_name
+    project_folder = _vault_subpath(settings.obsidian_projects_folder, project_name)
 
     if not project_folder.exists():
-        # Try case-insensitive search
+        # Try a normalised search. Projects are stored on disk under their slug
+        # ("ai-assistant") but are usually referred to by display name
+        # ("AI Assistant"), so treat -, _ and space as equivalent.
+        def _norm(value: str) -> str:
+            return value.lower().replace("-", " ").replace("_", " ").strip()
+
         projects = list((vault / settings.obsidian_projects_folder).iterdir()) if (vault / settings.obsidian_projects_folder).exists() else []
-        match = next((p for p in projects if p.name.lower() == project_name.lower()), None)
+        match = next((p for p in projects if _norm(p.name) == _norm(project_name)), None)
         if match:
             project_folder = match
         else:
@@ -530,21 +580,12 @@ async def obsidian_morning_briefing() -> str:
 # ─── 8. Re-index entire vault ─────────────────────────────────────────────────
 
 async def obsidian_reindex_vault() -> str:
-    """Walk the entire vault and index all notes for semantic search."""
-    vault = _vault()
-    count = 0
-    errors = 0
-
-    for md in vault.rglob("*.md"):
-        try:
-            content = md.read_text(encoding="utf-8", errors="replace")
-            await _index_note(str(md), md.stem, content)
-            count += 1
-        except Exception as e:
-            errors += 1
-            logger.warning("Failed to index {}: {}", md, e)
-
-    return f"Indexed {count} notes ({errors} errors)."
+    """
+    Reconcile the whole vault with the search index and knowledge graph:
+    index new/changed notes, prune entries for deleted notes.
+    """
+    from app.tools.obsidian_sync import backfill_vault
+    return str(await backfill_vault())
 
 
 # ─── 9. Read a note ───────────────────────────────────────────────────────────
@@ -575,7 +616,8 @@ async def obsidian_read_note(title: str) -> str:
 async def obsidian_list_vault(folder: str = "") -> str:
     """List notes in the vault or a subfolder."""
     vault = _vault()
-    target = vault / folder if folder else vault
+    _vault_subpath(folder)          # traversal guard; keep the unresolved path for relative_to()
+    target = vault / folder
 
     if not target.exists():
         return f"Folder '{folder}' not found in vault."

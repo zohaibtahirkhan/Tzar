@@ -39,6 +39,7 @@ import numpy as np
 from loguru import logger
 
 from app.config import settings
+from app.tools.rag.citations import Source, record_sources
 
 
 # ─── BM25 (pure Python, no extra deps) ───────────────────────────────────────
@@ -111,10 +112,17 @@ def _search_sync(
     query: str,
     top_k: int,
     source_filter: Optional[str],
+    project_id: Optional[int] = None,
 ) -> list[dict]:
     """
     Blocking hybrid search. Returns list of result dicts:
     {title, source_path, chunk_index, content, score}
+    
+    Args:
+        query: Search query
+        top_k: Number of results
+        source_filter: Optional filename filter
+        project_id: Optional project ID to scope search
     """
     from app.tools.obsidian import _get_embed_model
 
@@ -128,24 +136,39 @@ def _search_sync(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_path TEXT, title TEXT, chunk_index INTEGER,
             content TEXT, content_hash TEXT, embedding BLOB,
+            project_id INTEGER DEFAULT NULL,
             indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(source_path, chunk_index)
         )
     """)
     conn.commit()
 
-    # Fetch all rows (or filtered by source)
-    if source_filter:
-        rows = conn.execute(
-            "SELECT rowid, source_path, title, chunk_index, content, embedding "
-            "FROM doc_vectors WHERE source_path LIKE ? OR title LIKE ?",
-            (f"%{source_filter}%", f"%{source_filter}%"),
-        ).fetchall()
+    # Fetch rows with project filter if provided
+    if project_id is not None:
+        if source_filter:
+            rows = conn.execute(
+                "SELECT rowid, source_path, title, chunk_index, content, embedding "
+                "FROM doc_vectors WHERE project_id=? AND (source_path LIKE ? OR title LIKE ?)",
+                (project_id, f"%{source_filter}%", f"%{source_filter}%"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT rowid, source_path, title, chunk_index, content, embedding "
+                "FROM doc_vectors WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
     else:
-        rows = conn.execute(
-            "SELECT rowid, source_path, title, chunk_index, content, embedding "
-            "FROM doc_vectors"
-        ).fetchall()
+        if source_filter:
+            rows = conn.execute(
+                "SELECT rowid, source_path, title, chunk_index, content, embedding "
+                "FROM doc_vectors WHERE source_path LIKE ? OR title LIKE ?",
+                (f"%{source_filter}%", f"%{source_filter}%"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT rowid, source_path, title, chunk_index, content, embedding "
+                "FROM doc_vectors"
+            ).fetchall()
     conn.close()
 
     if not rows:
@@ -226,6 +249,7 @@ async def doc_search(
 ) -> str:
     """
     Hybrid search over ingested local documents.
+    Automatically scoped to active project if one is loaded.
 
     Args:
         query:         Natural-language question or keyword phrase
@@ -239,11 +263,28 @@ async def doc_search(
         "What did the Databricks contract say about Genie?"
         → doc_search(query="Databricks contract Genie") → top passages
     """
+    # Check if there's an active project to scope the search
+    from app.memory.projects import _active_project
+    project_id = None
+    if _active_project is not None:
+        # Get project ID from database
+        from app.memory.projects import _get_db as _get_projects_db
+        conn = _get_projects_db()
+        try:
+            row = conn.execute("SELECT id FROM projects WHERE slug=?", (_active_project.slug,)).fetchone()
+            if row:
+                project_id = row[0]
+        finally:
+            conn.close()
+    
     loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(
-        None, _search_sync, query, top_k, source_filter
+        None, _search_sync, query, top_k, source_filter, project_id
     )
-    return _format_results(results, query)
+    
+    record_sources(Source(r["title"], Path(r["source_path"]).name, "document") for r in results)
+    scope_note = f" (scoped to project '{_active_project.name}')" if _active_project else ""
+    return _format_results(results, query + scope_note)
 
 
 # ─── Unified search: Obsidian notes + local docs ─────────────────────────────

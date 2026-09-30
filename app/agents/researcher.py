@@ -61,6 +61,7 @@ class ResearchTask:
     report: str = ""
     note_title: str = ""
     sources: list[str] = field(default_factory=list)
+    saved_to_vault: bool = False
 
 
 # ─── Prompts ─────────────────────────────────────────────────────────────────
@@ -365,10 +366,10 @@ class ResearchAgent:
                 temperature=0.2,
             )
             data = self._parse_json_dict(raw)
-            task.findings = data.get("findings", [])
-            task.contradictions = data.get("contradictions", [])
-            task.summary = data.get("summary", "")
-            task.note_title = data.get("note_title", task.question[:60])
+            task.findings = self._str_list(data.get("findings"))
+            task.contradictions = self._str_list(data.get("contradictions"))
+            task.summary = str(data.get("summary") or "")
+            task.note_title = str(data.get("note_title") or task.question[:60])
         except Exception as e:
             logger.error("Synthesis LLM call failed: {}", e)
             # Fallback: use raw snippets
@@ -438,6 +439,7 @@ class ResearchAgent:
                 folder="Research",
                 tags=["research", "auto-generated"],
             )
+            task.saved_to_vault = True
             logger.info("ResearchAgent: saved to vault — {}", result)
         except Exception as e:
             logger.warning("Failed to save research to vault: {}", e)
@@ -461,17 +463,29 @@ class ResearchAgent:
             parts.append(f"Key findings: {bullet_str}.")
 
         if task.contradictions:
+            detail = (
+                " — see the full report in your vault for details."
+                if task.saved_to_vault else "."
+            )
             parts.append(
                 f"Note: I found {len(task.contradictions)} conflicting claim(s) "
-                "across sources — see the full report in your vault for details."
+                f"across sources{detail}"
             )
 
-        if task.note_title:
+        # Only claim the save when it actually succeeded — _save_to_vault
+        # swallows write failures, and it is skipped entirely when
+        # save_to_vault=False.
+        if task.saved_to_vault:
             parts.append(
                 f"I've saved a full report to your vault under '{task.note_title}'."
             )
 
-        return " ".join(parts) if parts else "Research complete. See your vault for the report."
+        if parts:
+            return " ".join(parts)
+        return (
+            "Research complete. See your vault for the report."
+            if task.saved_to_vault else "Research complete, but I couldn't extract any findings."
+        )
 
     # ── JSON parsing helpers ──────────────────────────────────────────────
 
@@ -486,25 +500,26 @@ class ResearchAgent:
             try:
                 data = json.loads(match.group())
                 if isinstance(data, list):
-                    return [str(x) for x in data if x]
+                    return ResearchAgent._str_list(data)
             except json.JSONDecodeError:
                 pass
         # Line-by-line fallback: extract quoted strings
         return re.findall(r'"([^"]{5,})"', clean)
 
     @staticmethod
+    def _str_list(value) -> list[str]:
+        """Coerce an LLM-supplied field to a list of non-empty strings."""
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [str(x).strip() for x in value if str(x).strip()]
+
+    @staticmethod
     def _parse_json_dict(raw: str) -> dict:
         """Extract a JSON object from LLM output."""
-        import json
-
-        clean = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-        match = re.search(r"\{.*\}", clean, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return {}
+        from app.llm.engine import parse_json_object
+        return parse_json_object(raw) or {}
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────

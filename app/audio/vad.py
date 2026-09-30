@@ -79,9 +79,13 @@ class SpeechCollector:
     when a complete utterance has been spoken.
     """
 
+    # Silero VAD accepts exactly this many samples per call (512 @ 16 kHz).
+    FRAME_SAMPLES = int(settings.audio_sample_rate * settings.audio_chunk_ms / 1000)
+
     def __init__(self, vad: VADEngine):
         self.vad = vad
         self._buffer: list[np.ndarray] = []
+        self._pending = np.zeros(0, dtype=np.float32)   # partial frame carried over
         self._is_speaking = False
         self._silence_frames = 0
         # How many consecutive silent frames before we declare end-of-speech
@@ -91,9 +95,18 @@ class SpeechCollector:
 
     def push(self, chunk: np.ndarray) -> Optional[np.ndarray]:
         """
-        Push one audio chunk.
-        Returns the full utterance numpy array when speech ends, else None.
+        Push audio of any length (the microphone sends exact frames, a browser
+        sends whatever its resampler produced). Feeds the VAD in FRAME_SAMPLES
+        slices and returns the utterance array when speech ends, else None.
         """
+        self._pending = np.concatenate([self._pending, chunk]) if len(self._pending) else chunk
+        utterance = None
+        while len(self._pending) >= self.FRAME_SAMPLES and utterance is None:
+            frame, self._pending = self._pending[:self.FRAME_SAMPLES], self._pending[self.FRAME_SAMPLES:]
+            utterance = self._push_frame(frame)
+        return utterance
+
+    def _push_frame(self, chunk: np.ndarray) -> Optional[np.ndarray]:
         prob = self.vad.is_speech(chunk)
         is_speech = prob >= settings.vad_threshold
 
@@ -117,6 +130,7 @@ class SpeechCollector:
 
     def reset(self) -> None:
         self._buffer.clear()
+        self._pending = np.zeros(0, dtype=np.float32)
         self._is_speaking = False
         self._silence_frames = 0
 

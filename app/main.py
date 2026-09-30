@@ -63,18 +63,7 @@ def load_core_models():
     logger.info("Loading core models...")
 
     try:
-        # for llama.cpp
-        llm_engine.load()
-        # For Ollama
-        # ok = llm_engine.health_check()
-        # if not ok:
-        #     logger.error(
-        #         "Ollama is not running or model '{}' is not pulled. "
-        #         "Start Ollama with: ollama serve   "
-        #         "Pull model with: ollama pull {}",
-        #         settings.llm_model, settings.llm_model
-        #     )
-        #     raise RuntimeError("Ollama unavailable — cannot start assistant.")
+        llm_engine.load()   # for Ollama: checks it's running and the model is pulled
     except Exception as e:
         logger.error("LLM load failed: {}", e)
 
@@ -87,6 +76,15 @@ def load_core_models():
         tts_engine.load()
     except Exception as e:
         logger.error("TTS load failed (non-critical): {}", e)
+
+    # Warm the embedding model too: it takes ~15s cold, and the first note or
+    # document search (including the needs_rag prompt prefetch) would otherwise
+    # stall on it mid-conversation.
+    try:
+        from app.tools.obsidian import _get_embed_model
+        _get_embed_model()
+    except Exception as e:
+        logger.error("Embedding model load failed (semantic search degraded): {}", e)
 
     logger.info("Models loaded.")
 
@@ -137,11 +135,15 @@ async def run_voice():
     load_core_models()
     load_voice_models()
 
+    from app.tools.obsidian_sync import start_vault_sync, stop_vault_sync
+    await start_vault_sync()
+
     microphone.start()
     try:
         await pipeline.run_voice_loop()
     finally:
         microphone.stop()
+        await stop_vault_sync()
 
 
 # ─── Mode: Terminal ───────────────────────────────────────────────────────────

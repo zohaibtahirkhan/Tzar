@@ -1,0 +1,370 @@
+{
+  "_doc": [
+    "Frozen routing expectations for every zero-LLM decision the pipeline makes",
+    "before a model is called. Edit deliberately: each case states the CORRECT",
+    "behaviour, not merely the current one. A case with 'known_gap' is a classifier",
+    "bug we know about — it runs as xfail(strict), so fixing the classifier makes",
+    "it fail loudly until the known_gap key is removed."
+  ],
+  "capabilities": [
+    {
+      "input": "hello",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "good morning",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "thanks",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "how are you today",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "what is 5 times 5?",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "explain what a transformer is",
+      "expect": {
+        "primary": "chat"
+      }
+    },
+    {
+      "input": "create a note about vector databases",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "create note",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "morning briefing",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "list files in my workspace",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "read the file called notes.txt",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "show me my knowledge graph stats",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "system profile",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "prune memories",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "list my notes",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      }
+    },
+    {
+      "input": "delete the file draft.md",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      },
+      "known_gap": "no tool signal for 'delete'; a destructive file op is classified as chat"
+    },
+    {
+      "input": "what can my computer run",
+      "expect": {
+        "primary": "tool",
+        "needs_tools": true
+      },
+      "known_gap": "README lists this phrase as a system_profile trigger but the classifier returns chat"
+    },
+    {
+      "input": "search my notes for attention mechanisms",
+      "expect": {
+        "primary": "rag",
+        "needs_rag": true
+      }
+    },
+    {
+      "input": "search the vault for transformers",
+      "expect": {
+        "primary": "rag",
+        "needs_rag": true
+      }
+    },
+    {
+      "input": "what did the databricks contract say about genie",
+      "expect": {
+        "primary": "rag",
+        "needs_rag": true
+      }
+    },
+    {
+      "input": "what does the data warehouse pdf say about fact tables",
+      "expect": {
+        "primary": "rag",
+        "needs_rag": true
+      }
+    },
+    {
+      "input": "find my notes on kafka",
+      "expect": {
+        "primary": "rag",
+        "needs_rag": true
+      },
+      "known_gap": "'find my notes' does not match the rag signals; classified as chat"
+    },
+    {
+      "input": "remember that I prefer dark mode",
+      "expect": {
+        "primary": "memory",
+        "needs_memory": true
+      }
+    },
+    {
+      "input": "what are my preferences",
+      "expect": {
+        "primary": "memory",
+        "needs_memory": true
+      }
+    },
+    {
+      "input": "what do you remember about me",
+      "expect": {
+        "primary": "memory",
+        "needs_memory": true
+      }
+    },
+    {
+      "input": "research the latest llama.cpp updates",
+      "expect": {
+        "primary": "research",
+        "needs_research": true
+      }
+    },
+    {
+      "input": "investigate recent advances in speculative decoding",
+      "expect": {
+        "primary": "research",
+        "needs_research": true
+      }
+    },
+    {
+      "input": "what's new in rust async",
+      "expect": {
+        "primary": "research",
+        "needs_research": true
+      }
+    },
+    {
+      "input": "compare postgres vs mysql for analytics",
+      "expect": {
+        "primary": "research",
+        "needs_research": true
+      }
+    },
+    {
+      "input": "find the latest snowflake release and create a note and link it",
+      "expect": {
+        "primary": "planning",
+        "needs_planning": true,
+        "needs_tools": true,
+        "is_complex": true
+      }
+    },
+    {
+      "input": "read my kafka notes, summarise them, and create a new note",
+      "expect": {
+        "primary": "planning",
+        "needs_planning": true,
+        "needs_rag": true,
+        "needs_tools": true,
+        "is_complex": true
+      }
+    },
+    {
+      "input": "search for X then save the result to a file",
+      "expect": {
+        "primary": "planning",
+        "needs_planning": true
+      }
+    }
+  ],
+  "morning_greeting_fast_path": [
+    {
+      "input": "good morning",
+      "expect": true
+    },
+    {
+      "input": "morning",
+      "expect": true
+    },
+    {
+      "input": "good evening",
+      "expect": false
+    },
+    {
+      "input": "morning briefing",
+      "expect": false,
+      "_why": "an explicit briefing request is a TOOL call, not the greeting shortcut"
+    }
+  ],
+  "memory_save_shortcircuit": [
+    {
+      "input": "remember that I prefer dark mode",
+      "expect": true
+    },
+    {
+      "input": "what do you remember about me",
+      "expect": false,
+      "_why": "a recall question must not be stored as a new memory"
+    },
+    {
+      "input": "hello",
+      "expect": false
+    },
+    {
+      "input": "remember I like tea",
+      "expect": true,
+      "known_gap": "needs_memory does not fire without 'that' after 'remember', so the short-circuit is skipped"
+    },
+    {
+      "input": "note that my dog is called rex",
+      "expect": true,
+      "known_gap": "'note that ...' matches the save trigger but not the memory capability"
+    }
+  ],
+  "project_switch_detection": [
+    {
+      "input": "continue the AI assistant project",
+      "expect": "AI assistant"
+    },
+    {
+      "input": "switch to workers welfare",
+      "expect": "workers welfare"
+    },
+    {
+      "input": "resume Databricks work",
+      "expect": "Databricks work"
+    },
+    {
+      "input": "work on the thesis",
+      "expect": "thesis"
+    },
+    {
+      "input": "search for the AI assistant project",
+      "expect": null,
+      "_why": "a search about a project must not switch to it"
+    },
+    {
+      "input": "find notes about databricks",
+      "expect": null
+    },
+    {
+      "input": "continue",
+      "expect": null,
+      "_why": "bare 'continue' is goal continuation, not a project switch"
+    },
+    {
+      "input": "open note Meeting Notes",
+      "expect": null,
+      "_why": "opening a note is a tool request, not a project switch"
+    },
+    {
+      "input": "load skill obsidian-idea-capture",
+      "expect": null,
+      "_why": "loading a skill is a tool request"
+    },
+    {
+      "input": "open the file notes.txt",
+      "expect": null,
+      "_why": "file access is a tool request"
+    }
+  ],
+  "goal_continuation": [
+    {
+      "input": "continue",
+      "expect": true
+    },
+    {
+      "input": "what's next",
+      "expect": true
+    },
+    {
+      "input": "next step",
+      "expect": true
+    },
+    {
+      "input": "go ahead",
+      "expect": true
+    },
+    {
+      "input": "hello",
+      "expect": false
+    },
+    {
+      "input": "create a note",
+      "expect": false
+    },
+    {
+      "input": "what's the next train to london",
+      "expect": false
+    },
+    {
+      "input": "please proceed with caution when driving",
+      "expect": false
+    },
+    {
+      "input": "ok go ahead",
+      "expect": true
+    },
+    {
+      "input": "continue please",
+      "expect": true
+    }
+  ]
+}

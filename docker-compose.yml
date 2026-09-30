@@ -1,0 +1,47 @@
+# =============================================================================
+# Tzar Voice Assistant — Docker Compose (API server + Ollama)
+#
+#   docker compose up -d            # start both
+#   docker compose exec ollama ollama pull qwen2.5:3b
+#   docker compose logs -f tzar
+#
+# Set OBSIDIAN_VAULT_PATH in your shell/.env to mount a vault read-write.
+# =============================================================================
+
+services:
+  tzar:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"   # no auth on this API — keep it off the LAN
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./AssistantWorkspace:/app/AssistantWorkspace
+      - ${OBSIDIAN_VAULT_PATH:-./data/vault}:/app/obsidian
+    environment:
+      - OBSIDIAN_VAULT_PATH=/app/obsidian
+      - LLM_BACKEND=ollama
+      - LLM_OLLAMA_HOST=http://ollama:11434
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b}
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # NVIDIA GPU: uncomment (needs the NVIDIA container toolkit on the host).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama_data:

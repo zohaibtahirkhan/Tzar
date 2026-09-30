@@ -79,11 +79,15 @@ class TestToolIntent:
         assert classify_intent("create a note about vector databases") == IntentType.TOOL
 
     def test_search_notes(self):
-        assert classify_intent("search my notes for attention mechanisms") == IntentType.TOOL
+        # Searching notes/vault/docs is retrieval: classify() sets needs_rag,
+        # and primary ranks rag above tools, so the legacy label is RAG.
+        assert classify_intent("search my notes for attention mechanisms") == IntentType.RAG
 
     def test_morning_briefing(self):
-        # "good morning" is 2 words → CHAT (via short-circuit)
-        # but if phrased differently:
+        # "good morning" matches no tool signal and stays CHAT; an actual
+        # briefing request is a TOOL regardless of how short it is.
+        assert classify_intent("good morning") == IntentType.CHAT
+        assert classify_intent("morning briefing") == IntentType.TOOL
         assert classify_intent("give me my morning briefing") == IntentType.TOOL
 
     def test_list_files(self):
@@ -93,7 +97,8 @@ class TestToolIntent:
         assert classify_intent("read the file called notes.txt") == IntentType.TOOL
 
     def test_obsidian_search(self):
-        assert classify_intent("search the vault for transformers") == IntentType.TOOL
+        # Same as test_search_notes — vault search is retrieval, not a bare tool call.
+        assert classify_intent("search the vault for transformers") == IntentType.RAG
 
     def test_knowledge_graph(self):
         assert classify_intent("show me my knowledge graph stats") == IntentType.TOOL
@@ -281,11 +286,25 @@ class TestResearchAgentDataModel:
         task.summary = "This is the executive summary."
         task.findings = ["Fact one.", "Fact two.", "Fact three."]
         task.note_title = "Test Research Report"
+        task.saved_to_vault = True
 
         response = agent._build_response(task)
         assert "This is the executive summary." in response
         assert "Fact one." in response
         assert "Test Research Report" in response
+
+    def test_build_response_omits_save_claim_when_not_saved(self):
+        """A failed or skipped vault write must not be reported as saved."""
+        from app.agents.researcher import ResearchAgent, ResearchTask
+        agent = ResearchAgent()
+        task = ResearchTask(question="test")
+        task.summary = "Summary."
+        task.note_title = "Unsaved Report"
+        task.saved_to_vault = False
+
+        response = agent._build_response(task)
+        assert "Unsaved Report" not in response
+        assert "saved" not in response.lower()
 
     def test_build_response_with_contradictions(self):
         from app.agents.researcher import ResearchAgent, ResearchTask

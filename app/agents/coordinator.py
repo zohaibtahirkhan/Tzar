@@ -1,14 +1,14 @@
 """
 app/agents/coordinator.py — Lean 2-Agent Coordinator
 
-Replaces the 5-agent orchestrator as the DEFAULT multi-step execution path.
+The single multi-step execution path (the direct tool loop in pipeline.py is
+its fallback when it times out or fails).
 
 Architecture:
     Coordinator       — reads capabilities, builds a plan, synthesises the answer
     ToolExecutor      — runs exactly one tool per call, returns structured result
 
     Researcher/Curator/SkillBuilder are background services, not blocking agents.
-    The 5-agent MultiAgentOrchestrator stays available via multi_agent_experimental=True.
 
 Flow:
     User text + Capabilities
@@ -42,12 +42,12 @@ from app.config import settings
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
+from app.tools.router import TOOL_EXECUTION_TIMEOUT_SECONDS   # re-exported; enforced inside dispatch()
+
 # Execution limits
-MAX_STEP_RETRIES = 1  # Max retry attempts per step
-TOOL_EXECUTION_TIMEOUT_SECONDS = 30.0  # Timeout per tool execution
-PLAN_GENERATION_TIMEOUT_SECONDS = 25.0  # Timeout for plan LLM call
-SYNTHESIS_TIMEOUT_SECONDS = 25.0  # Timeout for synthesis LLM call
-DIRECT_LLM_TIMEOUT_SECONDS = 30.0  # Timeout for fallback direct LLM
+PLAN_GENERATION_TIMEOUT_SECONDS = 45.0  # Timeout for plan LLM call (increased from 25s)
+SYNTHESIS_TIMEOUT_SECONDS = 35.0  # Timeout for synthesis LLM call (increased from 25s)
+DIRECT_LLM_TIMEOUT_SECONDS = 45.0  # Timeout for fallback direct LLM (increased from 30s)
 
 # Result size limits
 MAX_STEP_RESULT_CHARS = 2000  # Max chars per step result
@@ -116,27 +116,15 @@ class ToolExecutor:
         return self._router
 
     async def run(self, step: ToolStep) -> StepResult:
+        """dispatch() never raises and enforces the per-tool timeout itself."""
         t0 = time.perf_counter()
-        router = self._get_router()
-        try:
-            result = await asyncio.wait_for(
-                router.dispatch({"tool": step.tool, **step.params}),
-                timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
-            )
-            return StepResult(
-                tool=step.tool,
-                status=result.get("status", "ok"),
-                result=str(result.get("result", ""))[:MAX_STEP_RESULT_CHARS],
-                elapsed_ms=(time.perf_counter() - t0) * 1000,
-            )
-        except asyncio.TimeoutError:
-            logger.error("Tool '{}' timed out", step.tool)
-            return StepResult(tool=step.tool, status="error", result="Tool timed out.",
-                              elapsed_ms=(time.perf_counter() - t0) * 1000)
-        except Exception as exc:
-            logger.error("Tool '{}' raised: {}", step.tool, exc)
-            return StepResult(tool=step.tool, status="error", result=str(exc),
-                              elapsed_ms=(time.perf_counter() - t0) * 1000)
+        result = await self._get_router().dispatch({"tool": step.tool, **step.params})
+        return StepResult(
+            tool=step.tool,
+            status=result.get("status", "ok"),
+            result=str(result.get("result", ""))[:MAX_STEP_RESULT_CHARS],
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+        )
 
 
 tool_executor = ToolExecutor()
@@ -145,15 +133,12 @@ tool_executor = ToolExecutor()
 # ─── Critic ───────────────────────────────────────────────────────────────────
 
 _CRITIC_PROMPT = """\
-You are a quality critic for an AI assistant.
+Request: {request}
+Action: {action}
+Result: {result}
 
-Original request: {request}
-Step taken: {action}
-Result received: {result}
-
-Did this result fully address what was needed for this step?
-Answer ONLY with JSON — no prose.
-{{"satisfied": true_or_false, "reason": "one sentence", "retry_suggestion": "what to try instead if not satisfied"}}
+Did this satisfy the request? Answer in JSON only:
+{{"satisfied": true_or_false, "reason": "brief reason", "retry_suggestion": "what to try if failed"}}
 """
 
 class Critic:
@@ -172,6 +157,10 @@ class Critic:
         if result.status == "error":
             return CriticResult(satisfied=False, reason="Tool returned error.",
                                 retry_suggestion=f"Try a different approach for: {step.description}")
+
+        # Critic disabled: accept every successful step without an LLM call.
+        if not settings.critic_enabled:
+            return CriticResult(satisfied=True, reason="Critic disabled.")
 
         try:
             from app.llm.engine import llm_engine
@@ -209,82 +198,28 @@ critic = Critic()
 # ─── Plan generation ──────────────────────────────────────────────────────────
 
 _PLAN_PROMPT = """\
-You are a task planner for a local voice assistant.
-Produce a minimal execution plan for the user request.
- 
-CRITICAL: Output ONLY valid JSON. No markdown fences, no prose, no explanations.
-Start your response with { and end with }
- 
-EXACT FORMAT (copy this structure):
-{
-  "goal": "one sentence describing the end goal",
+Create a task plan in JSON format. Output ONLY JSON starting with {{ and ending with }}
+
+FORMAT:
+{{
+  "goal": "brief goal description",
   "steps": [
-    {"description": "what this step does", "tool": "tool_name", "params": {"param_name": "value"}, "required": true}
+    {{"description": "what to do", "tool": "tool_name", "params": {{"key": "value"}}, "required": true}}
   ]
-}
- 
-EXAMPLE OUTPUT:
-{
-  "goal": "Create a note about machine learning",
-  "steps": [
-    {"description": "Search vault for related notes", "tool": "obsidian_search", "params": {"query": "machine learning"}, "required": false},
-    {"description": "Create new note with content", "tool": "obsidian_create_note", "params": {"title": "Machine Learning Overview", "content": "Key concepts..."}, "required": true}
-  ]
-}
- 
-TOOL REFERENCE — always include the params shown:
- 
-  obsidian_search          params: {"query": "<search terms>"}
-  obsidian_keyword_search  params: {"query": "<keyword>"}
-  obsidian_read_note       params: {"title": "<note title>"}
-  obsidian_create_note     params: {"title": "<title>", "content": "<body>"}
-  obsidian_append_daily    params: {"content": "<text to append>"}
-  obsidian_capture_idea    params: {"content": "<idea text>"}
-  obsidian_list_vault      params: {}
-  obsidian_morning_briefing params: {}
-  obsidian_get_related     params: {"title": "<note title>"}
- 
-  web_search               params: {"query": "<search query>"}
- 
-  doc_search               params: {"query": "<search terms>"}
-  unified_search           params: {"query": "<search terms>"}
-  ingest_document          params: {"path": "<file path>"}
-  list_documents           params: {}
- 
-  kg_summary               params: {}
-  kg_add                   params: {"text": "<triples text>"}
-  kg_extract_and_index     params: {"text": "<raw text>", "note_title": "<title>"}
-  kg_path                  params: {"source": "<node>", "target": "<node>"}
-  kg_neighbors             params: {"node": "<node name>", "depth": 1}
-  kg_clusters              params: {}
- 
-  read_file                params: {"path": "<file path>"}
-  write_file               params: {"path": "<file path>", "content": "<text>"}
-  append_file              params: {"path": "<file path>", "content": "<text>"}
-  list_directory           params: {"path": "<directory path>"}
-  delete_file              params: {"path": "<file path>"}
- 
-  save_memory              params: {"category": "<category>", "content": "<fact>"}
-  recall_memory            params: {"query": "<search terms>"}
- 
-  project_list             params: {}
-  project_switch           params: {"name": "<project name>"}
-  system_profile           params: {}
-  memory_scores            params: {}
-  memory_prune             params: {}
-  mcp_status               params: {}
-  browser_action           params: {"task": "<what to do in browser>"}
- 
-Capabilities needed: {caps}
-Request: {request}
- 
-Rules:
-- Use EXACT tool names from the reference above.
-- ALWAYS include ALL required params — never use empty {{}} for tools that need a query.
-- Keep steps to 2–5. Single-tool tasks need exactly 1 step.
-- For note searches: use obsidian_search with the search terms as query.
-- For document/memory searches: use unified_search with the search terms as query.
-- required: false only for optional enrichment steps.
+}}
+
+AVAILABLE TOOLS:
+obsidian_search, obsidian_create_note, obsidian_append_daily, obsidian_read_note, obsidian_list_vault
+web_search, doc_search, unified_search, ingest_document, list_documents
+kg_summary, kg_add, kg_neighbors, kg_path, kg_clusters
+read_file, write_file, append_file, list_directory, delete_file
+save_memory, recall_memory
+project_list, project_switch, project_status
+system_profile, memory_scores, memory_prune, mcp_status
+
+User request: {request}
+
+Output JSON only. Start with {{ and end with }}
 """
 
 def _parse_plan_json(raw: str) -> dict | None:
@@ -360,10 +295,10 @@ async def _build_plan(ctx) -> list:
  
         raw = await llm_engine.generate_safe(
             [{"role": "user", "content": _PLAN_PROMPT.format(
-                caps=caps_summary,
                 request=ctx.user_text,
             )}],
-            system_prompt="You are a JSON-only output agent. Return ONLY valid JSON starting with { and ending with }. No markdown, no explanations.",
+            system_prompt="Output only valid JSON. Start with { and end with }",
+            max_tokens=500,
             timeout=PLAN_GENERATION_TIMEOUT_SECONDS,
         )
  
@@ -399,15 +334,12 @@ async def _build_plan(ctx) -> list:
 # ─── Synthesis ────────────────────────────────────────────────────────────────
 
 _SYNTH_PROMPT = """\
-You are a helpful voice assistant.
-Original request: {request}
+User asked: {request}
 
-Results from completed steps:
+Tool results:
 {results}
 
-Synthesise a clear, concise spoken response that directly answers the request.
-If any steps failed, acknowledge it briefly and provide what you can.
-Do NOT include JSON — respond in plain natural language only.
+Provide a clear, natural spoken response. If steps failed, acknowledge briefly and provide what you can.
 """
 
 
@@ -495,20 +427,20 @@ class Coordinator:
         if caps.needs_research and not caps.needs_tools and not caps.needs_planning:
             logger.info("Coordinator: pure research — delegating to ResearchAgent")
             from app.agents.researcher import research_agent
-            response = await research_agent.run(user_text)
-            await self._archive(user_text, response)
-            return response
+            return await research_agent.run(user_text)
 
         # Build plan
         steps = await _build_plan(ctx)
         if not steps:
-            logger.info("Coordinator: no plan generated, waiting {}ms then falling back to direct LLM", int(FALLBACK_DELAY_SECONDS * 1000))
-            await asyncio.sleep(FALLBACK_DELAY_SECONDS)   # give lock time to fully release
-            return await self._direct_llm(ctx)
+            logger.warning("Coordinator: plan generation failed or timed out")
+            # CRITICAL SAFETY: Do NOT make another LLM call immediately after a timeout.
+            # This causes segfaults in llama.cpp due to concurrent access.
+            # Instead, return a simple error response without using the LLM.
+            return "I'm having trouble processing that request right now. Please try again or rephrase your question."
 
         # Execute each step with critic evaluation
         for step in steps:
-            result = await self._execute_with_retry(step, ctx)
+            result = await self._execute_step(step, ctx)
             ctx.step_results.append(result)
             if result.status == "error" and step.required:
                 logger.warning("Required step '{}' failed — stopping plan", step.tool)
@@ -526,38 +458,24 @@ class Coordinator:
             sum(1 for r in ctx.step_results if r.status == "error"),
         )
 
-        await self._archive(user_text, response)
-
         # Background: run memory curator and skill observer
-        asyncio.create_task(self._background_tasks(user_text, ctx.step_results))
+        from app.pipeline import spawn_background
+        spawn_background(self._background_tasks(user_text, ctx.step_results))
 
-        return response
+        return response   # the pipeline archives the turn with what it actually speaks
 
-    async def _execute_with_retry(
-        self,
-        step: ToolStep,
-        ctx: CoordinatorContext,
-        max_retries: int = MAX_STEP_RETRIES,
-    ) -> StepResult:
-        """Run a step. If critic is unsatisfied, retry once with the suggestion."""
-        for attempt in range(max_retries + 1):
-            result = await tool_executor.run(step)
-
-            verdict = await critic.evaluate(ctx.user_text, step, result)
-            logger.debug(
-                "Critic [{}] attempt {}: satisfied={} — {}",
-                step.tool, attempt + 1, verdict.satisfied, verdict.reason[:80],
-            )
-
-            if verdict.satisfied:
-                return result
-
-            if attempt < max_retries and verdict.retry_suggestion:
-                logger.info("Critic unsatisfied — retrying '{}': {}", step.tool, verdict.retry_suggestion)
-                # Inject the retry suggestion into params
-                step.params["_retry_context"] = verdict.retry_suggestion
-
-        return result   # return last result even if still unsatisfied
+    async def _execute_step(self, step: ToolStep, ctx: CoordinatorContext) -> StepResult:
+        """
+        Run a step once and let the critic grade it. An unsatisfied verdict is
+        logged, not retried: re-running the identical call cannot change the
+        result, and nothing re-plans params from the critic's suggestion.
+        """
+        result = await tool_executor.run(step)
+        verdict = await critic.evaluate(ctx.user_text, step, result)
+        logger.debug("Critic [{}]: satisfied={} — {}", step.tool, verdict.satisfied, verdict.reason[:80])
+        if not verdict.satisfied:
+            logger.info("Critic unsatisfied with '{}': {}", step.tool, verdict.retry_suggestion or verdict.reason)
+        return result
 
     async def _direct_llm(self, ctx: CoordinatorContext) -> str:
         """Fallback: single LLM call with memory context."""
@@ -569,23 +487,14 @@ class Coordinator:
             system_prompt=system,
             timeout=DIRECT_LLM_TIMEOUT_SECONDS,
         )
-        await self._archive(ctx.user_text, response)
         return response.strip()
-
-    @staticmethod
-    async def _archive(user_text: str, response: str) -> None:
-        from app.memory.manager import memory_manager
-        from app.memory.session_store import log_turn
-        await memory_manager.add_turn(user_text, response)
-        await log_turn("user", user_text)
-        await log_turn("assistant", response)
 
     @staticmethod
     async def _background_tasks(user_text: str, results: list[StepResult]) -> None:
         """Non-blocking post-turn housekeeping."""
         try:
-            from app.memory.scoring import prune_low_score_memories_async
-            await prune_low_score_memories_async()
+            from app.memory.scoring import prune_low_score_memories
+            await prune_low_score_memories()
         except Exception as exc:
             logger.debug("Background curator skipped: {}", exc)
 
@@ -594,7 +503,7 @@ class Coordinator:
             tool_sequence = [r.tool for r in results if r.status == "ok"]
             if len(tool_sequence) >= 2:
                 from app.memory.skill_learner import skill_learner
-                skill_learner.observe_sequence(user_text, tool_sequence)
+                await skill_learner.log_execution(tool_sequence, user_text, "success")
         except Exception as exc:
             logger.debug("Skill observer skipped: {}", exc)
 

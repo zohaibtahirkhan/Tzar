@@ -16,10 +16,12 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncIterator
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
+from starlette.websockets import WebSocketClose
 from pydantic import BaseModel, Field
 from loguru import logger
 
@@ -71,8 +73,18 @@ async def lifespan(app: FastAPI):
             logger.info("MCP '{}': {}", srv, "connected" if ok else "FAILED")
     # ────────────────────────────────────────────────────────────────
 
+    # Warm the embedding model so the first search (or needs_rag prefetch)
+    # doesn't stall ~15s mid-conversation, then start vault sync.
+    from app.tools.obsidian import _get_embed_model
+    await asyncio.get_event_loop().run_in_executor(None, _get_embed_model)
+
+    from app.tools.obsidian_sync import start_vault_sync, stop_vault_sync
+    await start_vault_sync()
+
     logger.info("Backend ready.")
     yield
+
+    await stop_vault_sync()
 
     # ─── MCP Shutdown ───────────────────────────────────────────────
     if settings.mcp_enabled:
@@ -105,11 +117,28 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:8080",      # Alternative dev port
     "http://127.0.0.1:8080",
+    # Tauri v2 webview origins for the packaged desktop app
+    "tauri://localhost",          # macOS / Linux
+    "http://tauri.localhost",     # Windows (WebView2)
+    "https://tauri.localhost",
 ]
 
 # Add production origins from environment variable if set
 if hasattr(settings, 'allowed_origins') and settings.allowed_origins:
-    ALLOWED_ORIGINS.extend(settings.allowed_origins.split(','))
+    for origin in settings.allowed_origins.split(','):
+        origin = origin.strip()
+        if not origin:
+            continue
+        # A wildcard here would let any website the user visits drive this API,
+        # which exposes the filesystem and memory tools. Refuse it.
+        if origin == "*":
+            logger.warning(
+                "Ignoring ALLOWED_ORIGINS='*' — a CORS wildcard would let any "
+                "site reach this local API and its file/memory tools. "
+                "List the exact origins you need instead."
+            )
+            continue
+        ALLOWED_ORIGINS.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
@@ -120,6 +149,36 @@ app.add_middleware(
     max_age=3600,  # Cache preflight requests for 1 hour
 )
 
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", settings.api_host} | {
+    urlsplit(o).hostname for o in ALLOWED_ORIGINS
+}
+
+
+class LocalOnlyMiddleware:
+    """
+    CORS does not apply to WebSockets, and a DNS-rebound page is same-origin to
+    the browser — either way any website could drive the file/memory tools.
+    Refuse browser requests from unknown origins and requests for a Host that
+    isn't ours. Non-browser clients (curl, scripts) send no Origin and pass.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            headers = dict(scope["headers"])
+            origin = headers.get(b"origin", b"").decode("latin-1")
+            host = urlsplit("//" + headers.get(b"host", b"").decode("latin-1")).hostname
+            if (origin and origin not in ALLOWED_ORIGINS) or host not in ALLOWED_HOSTS:
+                logger.warning("Refused {} from origin={!r} host={!r}", scope["type"], origin, host)
+                if scope["type"] == "websocket":
+                    return await WebSocketClose(code=1008)(scope, receive, send)
+                return await PlainTextResponse("Forbidden origin or host", status_code=403)(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(LocalOnlyMiddleware)   # added last = runs first, before CORS
+
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
@@ -129,6 +188,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     tool_results: list[dict] = []
+    sources: list[dict] = []      # notes/documents the answer was grounded in
 
 class ToolRequest(BaseModel):
     tool: str
@@ -153,9 +213,14 @@ async def health():
     from app.audio.tts import tts_engine
     from app.audio.wake_word import wake_word_detector
 
+    llm_status = "loaded" if llm_engine.is_loaded() else "not loaded"
+    if settings.LLM_BACKEND == "ollama":
+        # Ollama runs separately and can stop or lack the model — check it for real.
+        llm_status = await asyncio.to_thread(llm_engine.ollama_problem) or "loaded"
+
     return {
         "status":       "ok",
-        "llm":          "loaded" if llm_engine.is_loaded()         else "not loaded",
+        "llm":          llm_status,
         "stt":          "loaded" if stt_engine.is_loaded()         else "not loaded",
         "tts":          "loaded" if tts_engine.is_loaded()         else "not loaded",
         "wake_word":    "loaded" if wake_word_detector.is_loaded() else "failed",
@@ -170,47 +235,40 @@ async def health():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     from app.pipeline import pipeline
-    from app.tools.router import extract_tool_calls
 
     try:
-        response = await pipeline.process_text_input(req.message)
-        return ChatResponse(response=response)
+        result = await pipeline.run_turn(req.message)
     except Exception as e:
-        logger.error("/chat error: {}", e)
+        logger.exception("/chat error")
         raise HTTPException(status_code=500, detail=str(e))
+    return ChatResponse(response=result.response, tool_results=result.tool_results, sources=result.sources)
 
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """Server-Sent Events streaming response."""
+    """
+    Server-Sent Events. Each event is one JSON object:
+      {"token": text}                        status lines and answer text, in order
+      {"tool_results": [...], "sources": [...]}   once, after the answer
+      {"error": message}
+    then the literal `[DONE]`.
+    """
     from app.pipeline import pipeline
 
+    def sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload)}\n\n"
+
     async def event_generator():
-        tool_results_collected: list[dict] = []
         try:
-            async for chunk in pipeline.process_text_input_streaming(req.message):
-                # Status tokens like "[Running tool_name...]" — parse tool result
-                # signals embedded in the stream and collect them
-                if chunk.startswith("[Running ") and chunk.endswith("...]"):
-                    tool_name = chunk[9:-4]
-                    # Emit a status token for the UI to display
-                    data = json.dumps({"token": chunk})
-                    yield f"data: {data}\n\n"
-                else:
-                    data = json.dumps({"token": chunk})
-                    yield f"data: {data}\n\n"
- 
-            # After all tokens are streamed, emit any collected tool results
-            # so the UI can render expandable tool result rows.
-            # The pipeline stores the last turn's tool results on itself.
-            if hasattr(pipeline, "_last_tool_results") and pipeline._last_tool_results:
-                yield f"data: {json.dumps({'tool_results': pipeline._last_tool_results})}\n\n"
- 
+            async for event in pipeline.stream(req.message):
+                if event.kind in ("status", "text"):
+                    yield sse({"token": event.text})
+                elif event.kind == "done":
+                    yield sse({"tool_results": event.result.tool_results, "sources": event.result.sources})
             yield "data: [DONE]\n\n"
-            
         except Exception as e:
-            logger.error("/chat/stream error: {}", e)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            logger.exception("/chat/stream error")
+            yield sse({"error": str(e)})
 
     return StreamingResponse(
         event_generator(),
@@ -337,16 +395,14 @@ async def websocket_audio(ws: WebSocket):
     await ws.accept()
     logger.info("WebSocket audio connection opened")
 
-    from app.audio.vad import VADEngine, SpeechCollector
+    from app.audio.vad import vad_engine, SpeechCollector
     from app.audio.stt import stt_engine
     from app.audio.tts import tts_engine
     from app.pipeline import pipeline
 
     import numpy as np
 
-    local_vad = VADEngine()
-    local_vad.load()
-    collector = SpeechCollector(local_vad)
+    collector = SpeechCollector(vad_engine)
 
     try:
         while True:
@@ -355,7 +411,7 @@ async def websocket_audio(ws: WebSocket):
             if "bytes" in message and message["bytes"]:
                 raw = message["bytes"]
                 chunk = np.frombuffer(raw, dtype=np.float32)
-                utterance = collector.push(chunk)
+                utterance = collector.push(chunk)   # re-framed to VAD-sized frames inside
 
                 if utterance is not None:
                     # Transcribe

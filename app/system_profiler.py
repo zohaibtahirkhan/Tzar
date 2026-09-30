@@ -69,6 +69,7 @@ class SystemProfile:
     has_avx: bool = False
     has_avx2: bool = False
     has_avx512: bool = False
+    avx_detected: bool = True    # False when the platform offers no way to check
 
     # RAM
     ram_total_mb: int = 0
@@ -159,6 +160,29 @@ def _get_ram() -> tuple[int, int]:
         avail = int(avail_m.group(1)) // 1024 if avail_m else total // 2
         return total, avail
 
+    # macOS fallback
+    if platform.system() == "Darwin":
+        memsize = _run("sysctl -n hw.memsize")
+        if memsize.isdigit():
+            total = int(memsize) // (1024 * 1024)
+            return total, total // 2   # no cheap "available" figure without psutil
+
+    # Windows fallback
+    if platform.system() == "Windows":
+        total_out = _run(
+            'powershell -NoProfile -Command '
+            '"(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"'
+        )
+        avail_out = _run(
+            'powershell -NoProfile -Command '
+            '"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"'
+        )
+        if total_out.isdigit():
+            total = int(total_out) // (1024 * 1024)
+            # FreePhysicalMemory is reported in kilobytes.
+            avail = int(avail_out) // 1024 if avail_out.isdigit() else total // 2
+            return total, avail
+
     return 0, 0
 
 
@@ -185,8 +209,16 @@ def _get_cpu() -> dict:
             info["name"] = cpuinfo.split(":", 1)[-1].strip()
     elif platform.system() == "Darwin":
         info["name"] = _run("sysctl -n machdep.cpu.brand_string")
+    elif platform.system() == "Windows":
+        name = _run(
+            'powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"'
+        )
+        if name:
+            info["name"] = name.splitlines()[0].strip()
 
-    # AVX flags
+    # AVX flags. No cheap way to read these on Windows, so they stay unknown
+    # there — `avx_detected` tells callers not to trust the False values.
+    info["avx_detected"] = True
     if platform.system() == "Linux":
         flags = _run("grep -m1 flags /proc/cpuinfo")
         info["avx"]    = "avx"    in flags
@@ -195,6 +227,8 @@ def _get_cpu() -> dict:
     elif platform.system() == "Darwin":
         info["avx"]  = bool(_run("sysctl -n hw.optional.avx1_0"))
         info["avx2"] = bool(_run("sysctl -n hw.optional.avx2_0"))
+    else:
+        info["avx_detected"] = False
 
     return info
 
@@ -244,11 +278,34 @@ def _get_gpus() -> list[GPUInfo]:
                         vram = 0
                     gpus.append(GPUInfo(vendor="amd", name=f"AMD GPU {len(gpus)}", vram_mb=vram))
 
-    # Intel Arc (fallback via lspci)
-    if not gpus:
+    # Intel Arc (fallback via lspci — Unix only)
+    if not gpus and platform.system() != "Windows":
         lspci = _run("lspci | grep -i 'vga\\|3d\\|display'")
         if "Intel" in lspci and "Arc" in lspci:
             gpus.append(GPUInfo(vendor="intel", name="Intel Arc", vram_mb=0))
+
+    # Windows fallback — nvidia-smi already covers NVIDIA, this catches the rest
+    if not gpus and platform.system() == "Windows":
+        out = _run(
+            'powershell -NoProfile -Command '
+            '"Get-CimInstance Win32_VideoController | '
+            'ForEach-Object { $_.Name + \',\' + $_.AdapterRAM }"'
+        )
+        for line in out.splitlines():
+            name, _, vram_raw = line.partition(",")
+            name = name.strip()
+            if not name:
+                continue
+            vram_raw = vram_raw.strip()
+            vram = int(vram_raw) // (1024 * 1024) if vram_raw.isdigit() else 0
+            lowered = name.lower()
+            vendor = (
+                "nvidia" if "nvidia" in lowered
+                else "amd" if ("amd" in lowered or "radeon" in lowered)
+                else "intel" if "intel" in lowered
+                else "unknown"
+            )
+            gpus.append(GPUInfo(vendor=vendor, name=name, vram_mb=vram))
 
     return gpus
 
@@ -289,6 +346,7 @@ def profile_system() -> SystemProfile:
     profile.has_avx          = cpu["avx"]
     profile.has_avx2         = cpu["avx2"]
     profile.has_avx512       = cpu["avx512"]
+    profile.avx_detected     = cpu["avx_detected"]
 
     # RAM
     profile.ram_total_mb, profile.ram_available_mb = _get_ram()
@@ -464,7 +522,7 @@ def recommend_models(profile: SystemProfile) -> ModelRecommendation:
             break
 
     # ── AVX warning ───────────────────────────────────────────────────────────
-    if not profile.has_avx2 and backend == "llamacpp":
+    if profile.avx_detected and not profile.has_avx2 and backend == "llamacpp":
         warnings.append(
             "No AVX2 detected — llama-cpp-python will be slow. "
             "Use the generic build: pip install llama-cpp-python --force-reinstall"

@@ -55,16 +55,13 @@ from app.config import settings
 
 # ─── DB path ─────────────────────────────────────────────────────────────────
 
-_KG_DB = settings.data_dir / "knowledge_graph.db"
-
-# Public alias — monkeypatched by tests via:
+# Monkeypatched by tests via:
 #   monkeypatch.setattr(kg, "KG_DB_PATH", tmp_path / "kg.db")
-KG_DB_PATH = _KG_DB
+KG_DB_PATH = settings.kg_db
 
 
 def _get_kg_conn() -> sqlite3.Connection:
-    import app.tools.knowledge_graph as _self
-    conn = sqlite3.connect(str(_self.KG_DB_PATH))
+    conn = sqlite3.connect(str(KG_DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
@@ -243,35 +240,39 @@ async def kg_extract_and_index(
     note_title: str = "",
     content: str = "",          # alias for text — accepted for API compat
     llm_generate_fn=None,       # accepted but unused — LLM called internally
+    use_llm: bool = True,
 ) -> str:
     """
     Two-pass entity + triple extraction:
       Pass 1 (fast, regex)  — extract noun/acronym candidates
       Pass 2 (LLM, ~1s)    — extract (subject, relation, object) triples
- 
+
     Falls back to co-occurrence edges if LLM call fails.
+    use_llm=False skips Pass 2 entirely — for background work (vault sync,
+    backfill) that must never compete with the user for the inference slot.
     """
     effective_text   = content or text
     effective_source = note_title or source_note or "auto"
- 
+
     if not effective_text.strip():
         return "KG: no text provided"
- 
+
     # ── Pass 1: regex entity extraction (existing) ────────────────────────────
     entities = extract_entities(effective_text)
- 
+
     # ── Pass 2: LLM triple extraction ─────────────────────────────────────────
-    try:
-        from app.tools.kg_triple_extraction import extract_triples_llm, merge_into_kg
-        triples = await extract_triples_llm(effective_text)
- 
-        if triples:
-            return await merge_into_kg(effective_source, entities, triples)
- 
-        # LLM gave no triples — fall through to co-occurrence
-        logger.debug("KG: LLM returned no triples, using co-occurrence fallback")
-    except Exception as exc:
-        logger.warning("KG triple extraction unavailable: {} — using co-occurrence", exc)
+    if use_llm:
+        try:
+            from app.tools.kg_triple_extraction import extract_triples_llm, merge_into_kg
+            triples = await extract_triples_llm(effective_text)
+
+            if triples:
+                return await merge_into_kg(effective_source, entities, triples)
+
+            # LLM gave no triples — fall through to co-occurrence
+            logger.debug("KG: LLM returned no triples, using co-occurrence fallback")
+        except Exception as exc:
+            logger.warning("KG triple extraction unavailable: {} — using co-occurrence", exc)
  
     # ── Fallback: co-occurrence relations (original behaviour) ────────────────
     if not entities:
@@ -454,7 +455,7 @@ async def kg_find_orphans() -> str:
             LEFT JOIN edges e ON (e.source_id=n.id OR e.target_id=n.id)
             WHERE e.id IS NULL
             ORDER BY n.created_at DESC
-            LIMIT 20
+            LIMIT 50
         """).fetchall()
         conn.close()
         return rows
@@ -464,23 +465,22 @@ async def kg_find_orphans() -> str:
     if not rows:
         return "No orphan nodes — all entities are connected."
 
-    names = [f"{r['name']} ({r['label']})" for r in rows]
-    return f"Orphan nodes ({len(names)}):\n" + "\n".join(f"  - {n}" for n in names)
+    names = [f"{r['name']} [{r['label']}]" for r in rows]
+    return f"Orphan nodes ({len(names)}):\n" + "\n".join(names)
 
 
-async def kg_find_clusters(min_size: int = 3) -> str:
+async def kg_find_clusters(min_size: int = 2) -> str:
     """
     Find connected clusters of related nodes using Union-Find.
-    Returns clusters larger than `min_size`.
+    Returns clusters larger than `min_size` WITH their edges for visualization.
     """
     loop = asyncio.get_running_loop()
 
     def _cluster():
         conn = _get_kg_conn()
-        nodes = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM nodes").fetchall()}
-        edges = conn.execute("SELECT source_id, target_id FROM edges").fetchall()
-        conn.close()
-
+        nodes = {r["id"]: (r["name"], r["label"]) for r in conn.execute("SELECT id, name, label FROM nodes").fetchall()}
+        edges = conn.execute("SELECT source_id, target_id, relation FROM edges").fetchall()
+        
         # Union-Find
         parent = {nid: nid for nid in nodes}
 
@@ -499,23 +499,45 @@ async def kg_find_clusters(min_size: int = 3) -> str:
             if e["source_id"] in parent and e["target_id"] in parent:
                 union(e["source_id"], e["target_id"])
 
-        clusters: dict[int, list[str]] = defaultdict(list)
-        for nid, name in nodes.items():
-            clusters[find(nid)].append(name)
+        clusters: dict[int, list[int]] = defaultdict(list)
+        for nid in nodes:
+            clusters[find(nid)].append(nid)
+        
+        # Get edges for each cluster
+        cluster_edges = []
+        for cluster_nodes in clusters.values():
+            if len(cluster_nodes) >= min_size:
+                node_ids = set(cluster_nodes)
+                for e in edges:
+                    if e["source_id"] in node_ids and e["target_id"] in node_ids:
+                        src_name, src_label = nodes[e["source_id"]]
+                        tgt_name, tgt_label = nodes[e["target_id"]]
+                        cluster_edges.append((src_name, src_label, e["relation"], tgt_name, tgt_label))
 
-        return [c for c in clusters.values() if len(c) >= min_size]
+        conn.close()
+        return clusters, nodes, cluster_edges
 
-    clusters = await loop.run_in_executor(None, _cluster)
+    clusters, nodes, cluster_edges = await loop.run_in_executor(None, _cluster)
+    
+    valid_clusters = [c for c in clusters.values() if len(c) >= min_size]
 
-    if not clusters:
+    if not valid_clusters:
         return "No clusters found (graph may be sparsely connected)."
 
-    clusters.sort(key=len, reverse=True)
-    lines = [f"Found {len(clusters)} cluster(s) with ≥{min_size} nodes:\n"]
-    for i, c in enumerate(clusters[:8], 1):
-        sample = ", ".join(c[:6])
+    valid_clusters.sort(key=len, reverse=True)
+    lines = [f"Found {len(valid_clusters)} cluster(s) with ≥{min_size} nodes:\n"]
+    for i, c in enumerate(valid_clusters[:8], 1):
+        cluster_names = [nodes[nid][0] for nid in c]
+        sample = ", ".join(cluster_names[:6])
         suffix = f" (+{len(c)-6} more)" if len(c) > 6 else ""
         lines.append(f"  Cluster {i} ({len(c)} nodes): {sample}{suffix}")
+    
+    # Add edges in visualization format
+    if cluster_edges:
+        lines.append("\nCluster edges:")
+        for src_name, src_label, rel, tgt_name, tgt_label in cluster_edges[:100]:
+            lines.append(f"  {src_name} [{src_label}] —[{rel}]→ {tgt_name} [{tgt_label}]")
+    
     return "\n".join(lines)
 
 
@@ -573,7 +595,7 @@ async def kg_temporal_query(node: str) -> str:
 
 
 async def kg_graph_summary() -> str:
-    """High-level stats about the knowledge graph."""
+    """High-level stats about the knowledge graph WITH actual edges for visualization."""
     loop = asyncio.get_running_loop()
 
     def _stats():
@@ -595,11 +617,25 @@ async def kg_graph_summary() -> str:
             JOIN edges e ON (e.source_id=n.id OR e.target_id=n.id)
             GROUP BY n.id ORDER BY c DESC LIMIT 5
         """).fetchall()
+        
+        # Get ALL edges with node labels for visualization
+        all_edges = conn.execute("""
+            SELECT 
+                n1.name as source_name, 
+                n1.label as source_label,
+                e.relation,
+                n2.name as target_name,
+                n2.label as target_label
+            FROM edges e
+            JOIN nodes n1 ON e.source_id = n1.id
+            JOIN nodes n2 ON e.target_id = n2.id
+            LIMIT 200
+        """).fetchall()
 
         conn.close()
-        return n_nodes, n_edges, labels, relations, most_connected
+        return n_nodes, n_edges, labels, relations, most_connected, all_edges
 
-    n_nodes, n_edges, labels, relations, most_connected = await loop.run_in_executor(None, _stats)
+    n_nodes, n_edges, labels, relations, most_connected, all_edges = await loop.run_in_executor(None, _stats)
 
     lines = [
         f"Knowledge Graph — {n_nodes} nodes, {n_edges} edges",
@@ -617,6 +653,12 @@ async def kg_graph_summary() -> str:
         lines.append("\nMost connected nodes:")
         for r in most_connected:
             lines.append(f"  {r['name']} ({r['c']} edges)")
+    
+    # Add edges in format: NodeA [label] —[relation]→ NodeB [label]
+    if all_edges:
+        lines.append("\nGraph edges:")
+        for e in all_edges:
+            lines.append(f"  {e['source_name']} [{e['source_label']}] —[{e['relation']}]→ {e['target_name']} [{e['target_label']}]")
 
     return "\n".join(lines)
 

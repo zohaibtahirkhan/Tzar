@@ -59,7 +59,7 @@ from app.config import settings
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
 
-_PROJECT_DB = settings.data_dir / "projects.db"
+_PROJECT_DB = settings.projects_db
 
 # Module-level active project state
 _active_project: Optional["ProjectContext"] = None
@@ -107,6 +107,7 @@ class ProjectContext:
     open_tasks: list[str] = field(default_factory=list)   # unchecked - [ ] items
     memories: list[str] = field(default_factory=list)     # relevant memory snippets
     graph_entities: list[str] = field(default_factory=list)
+    document_count: int = 0                                # number of ingested documents
     loaded_at: str = ""
 
     def to_context_string(self) -> str:
@@ -115,6 +116,9 @@ class ProjectContext:
         
         if self.description:
             parts.append(f"Description: {self.description}")
+        
+        if self.document_count > 0:
+            parts.append(f"Documents: {self.document_count} PDFs/docs ingested (searchable via doc_search)")
 
         if self.open_tasks:
             parts.append(f"\nOpen tasks ({len(self.open_tasks)}):")
@@ -141,10 +145,11 @@ class ProjectContext:
         """Short spoken confirmation for TTS."""
         task_str  = f"{len(self.open_tasks)} open tasks" if self.open_tasks else "no open tasks"
         note_str  = f"{len(self.notes)} notes" if self.notes else "no notes"
+        doc_str   = f"{self.document_count} documents" if self.document_count else "no documents"
         mem_str   = f"{len(self.memories)} related memories" if self.memories else "no related memories"
         return (
             f"Switched to project {self.name}. "
-            f"I've loaded {note_str}, {task_str}, and {mem_str}. "
+            f"I've loaded {note_str}, {doc_str}, {task_str}, and {mem_str}. "
             f"What would you like to do?"
         )
 
@@ -320,18 +325,19 @@ async def project_switch(name: str) -> str:
         loaded_at    = datetime.now().strftime("%H:%M"),
     )
 
-    # 2. Load in parallel: notes, tasks, memories, graph
+    # 2. Load in parallel: notes, tasks, memories, graph, documents
     await asyncio.gather(
         _load_notes(ctx),
         _load_memories(ctx, proj_row.get("memory_tags", "[]")),
         _load_graph_entities(ctx),
+        _load_document_count(ctx, proj_row["id"]),
     )
 
     _active_project = ctx
     logger.info(
-        "Project '{}' loaded: {} notes, {} tasks, {} memories, {} entities",
+        "Project '{}' loaded: {} notes, {} tasks, {} memories, {} entities, {} documents",
         ctx.name, len(ctx.notes), len(ctx.open_tasks),
-        len(ctx.memories), len(ctx.graph_entities),
+        len(ctx.memories), len(ctx.graph_entities), ctx.document_count,
     )
     return ctx.to_spoken_summary()
 
@@ -340,7 +346,9 @@ async def _load_notes(ctx: ProjectContext) -> None:
     """Load notes from the project's Obsidian vault folder."""
     try:
         from app.tools.obsidian import obsidian_get_project_context
-        raw = await obsidian_get_project_context(ctx.name)
+        # vault_folder is the authoritative on-disk folder (defaults to the
+        # slug); ctx.name is only the display name.
+        raw = await obsidian_get_project_context(ctx.vault_folder or ctx.name)
 
         # Parse "=== Title ===\n<content>" blocks
         blocks = re.split(r"=== (.+?) ===\n", raw)
@@ -410,6 +418,29 @@ async def _load_graph_entities(ctx: ProjectContext) -> None:
         logger.debug("Could not load KG entities for project: {}", e)
 
 
+async def _load_document_count(ctx: ProjectContext, project_id: int) -> None:
+    """Load count of documents ingested for this project."""
+    try:
+        loop = asyncio.get_running_loop()
+        
+        def _count():
+            from app.tools.rag.ingestor import _get_doc_db
+            conn = _get_doc_db()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(DISTINCT source_path) FROM doc_vectors WHERE project_id=?",
+                    (project_id,)
+                ).fetchone()
+                return row[0] if row else 0
+            finally:
+                conn.close()
+        
+        ctx.document_count = await loop.run_in_executor(None, _count)
+    except Exception as e:
+        logger.debug("Could not load document count for project: {}", e)
+        ctx.document_count = 0
+
+
 # ─── Context injection ────────────────────────────────────────────────────────
 
 def get_active_project_context() -> str:
@@ -421,7 +452,7 @@ def get_active_project_context() -> str:
     """
     if _active_project is None:
         return ""
-    return "\n\n" + _active_project.to_context_string()
+    return _active_project.to_context_string()
 
 
 def get_active_project_name() -> Optional[str]:
@@ -441,8 +472,11 @@ def clear_active_project() -> str:
 
 # ─── Intent detection helper ─────────────────────────────────────────────────
 
+# "open note X" / "load skill X" / "open the file Y" are tool requests, not
+# project switches — the negative lookahead rejects those nouns.
 _PROJECT_NAME_PATTERN = re.compile(
     r"\b(switch to|load|open|resume|continue|work on)\s+"
+    r"(?!(?:the\s+)?(?:note|skill|file|document|daily|browser|vault|memory|graph)s?\b)"
     r"(?:the\s+)?(.+?)(?:\s+project)?\s*[.!]?\s*$",
     re.IGNORECASE,
 )
@@ -466,6 +500,9 @@ def extract_project_name_from_query(text: str) -> Optional[str]:
         "switch to workers welfare" → "workers welfare"
         "resume Databricks work" → "Databricks work"
     """
+    if not settings.project_auto_detect:
+        return None
+
     stripped = text.strip()
 
     # Fast reject to avoid matching "search for...", "find...", etc.

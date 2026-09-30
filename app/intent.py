@@ -369,10 +369,10 @@ def classify(user_text: str) -> Capabilities:
     lower = text.lower()
     caps  = Capabilities()
 
-    # Very short inputs are always CHAT
-    if len(lower.split()) <= 3:
-        _log(caps, user_text, t0)
-        return caps
+    # No length short-circuit: it used to return CHAT for anything under four
+    # words, which silently swallowed real commands ("create note",
+    # "morning briefing", "prune memories"). Greetings need no special case —
+    # they match no signal and fall through to CHAT anyway.
 
     # ── Independent flag setting — ALL can fire ───────────────────────────────
     if _matches(text, _RESEARCH_COMPILED):  caps.needs_research = True

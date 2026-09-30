@@ -21,8 +21,8 @@ from app.memory.scoring import score_memory, on_memory_recalled, rank_memories_b
 MEMORY_PATH = settings.data_dir / "MEMORY.md"
 USER_PATH   = settings.data_dir / "USER.md"
 
-MEMORY_CHAR_LIMIT = 2200   # ~800 tokens
-USER_CHAR_LIMIT   = 1375   # ~500 tokens
+MEMORY_CHAR_LIMIT = 1200   # ~400 tokens (reduced from 2200)
+USER_CHAR_LIMIT   = 800    # ~280 tokens (reduced from 1375)
 
 SEPARATOR = "\n§\n"   # entry delimiter — same as Hermes
 
@@ -33,12 +33,14 @@ def _ensure_files() -> None:
     if not MEMORY_PATH.exists():
         MEMORY_PATH.write_text(
             "# Agent Memory\n"
-            "# Auto-managed. One fact per entry, separated by §\n\n"
+            "# Auto-managed. One fact per entry, separated by §\n\n",
+            encoding="utf-8",
         )
     if not USER_PATH.exists():
         USER_PATH.write_text(
             "# User Profile\n"
-            "# Auto-managed. One fact per entry, separated by §\n\n"
+            "# Auto-managed. One fact per entry, separated by §\n\n",
+            encoding="utf-8",
         )
 
 

@@ -20,6 +20,7 @@ Schema (in obsidian_vectors.db):
     │ content     TEXT     — raw chunk text (for display)  │
     │ content_hash TEXT    — MD5 of chunk (skip re-embed)  │
     │ embedding   BLOB     — float32 numpy bytes           │
+    │ project_id  INTEGER  — optional FK to projects table │
     │ indexed_at  TIMESTAMP                                │
     └─────────────────────────────────────────────────────┘
 
@@ -46,8 +47,8 @@ from app.config import settings
 
 # ─── Chunking ─────────────────────────────────────────────────────────────────
 
-CHUNK_WORDS   = 200     # target words per chunk
-CHUNK_OVERLAP = 40      # words of overlap between consecutive chunks
+CHUNK_WORDS   = settings.rag_chunk_words     # target words per chunk
+CHUNK_OVERLAP = settings.rag_chunk_overlap   # words of overlap between consecutive chunks
 
 
 def _chunk_text(text: str) -> list[str]:
@@ -199,12 +200,14 @@ def _get_doc_db() -> sqlite3.Connection:
             content      TEXT,
             content_hash TEXT,
             embedding    BLOB,
+            project_id   INTEGER DEFAULT NULL,
             indexed_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(source_path, chunk_index)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_path ON doc_vectors(source_path)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_title ON doc_vectors(title)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_project ON doc_vectors(project_id)")
     conn.commit()
     return conn
 
@@ -219,10 +222,14 @@ def _get_embed_model():
 
 # ─── Core ingestion ───────────────────────────────────────────────────────────
 
-def _ingest_sync(path: Path) -> tuple[int, int]:
+def _ingest_sync(path: Path, project_id: int | None = None) -> tuple[int, int]:
     """
     Blocking ingestion. Returns (chunks_added, chunks_skipped).
     Run in executor — never call from async code directly.
+    
+    Args:
+        path: Path to document to ingest
+        project_id: Optional project ID to scope this document to a project
     """
     model = _get_embed_model()
     if model is None:
@@ -247,19 +254,26 @@ def _ingest_sync(path: Path) -> tuple[int, int]:
 
         # Check if this chunk is already current
         row = conn.execute(
-            "SELECT content_hash FROM doc_vectors WHERE source_path=? AND chunk_index=?",
+            "SELECT content_hash, project_id FROM doc_vectors WHERE source_path=? AND chunk_index=?",
             (str(path), idx),
         ).fetchone()
         if row and row[0] == chunk_hash:
             skipped += 1
+            # Content unchanged, but still honor a requested project reassignment —
+            # otherwise re-ingesting into a different project silently no-ops.
+            if row[1] != project_id:
+                conn.execute(
+                    "UPDATE doc_vectors SET project_id=? WHERE source_path=? AND chunk_index=?",
+                    (project_id, str(path), idx),
+                )
             continue
 
         vec = model.encode(chunk, normalize_embeddings=True).astype(np.float32).tobytes()
         conn.execute(
             """INSERT OR REPLACE INTO doc_vectors
-               (source_path, title, chunk_index, content, content_hash, embedding)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (str(path), title, idx, chunk, chunk_hash, vec),
+               (source_path, title, chunk_index, content, content_hash, embedding, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (str(path), title, idx, chunk, chunk_hash, vec, project_id),
         )
         added += 1
 
@@ -274,9 +288,14 @@ def _ingest_sync(path: Path) -> tuple[int, int]:
     return added, skipped
 
 
-async def ingest_document(path: str | Path) -> str:
+async def ingest_document(path: str | Path, project: str = None) -> str:
     """
     Ingest a single document into the vector store.
+    
+    Args:
+        path: Path to the document
+        project: Optional project name to scope this document to
+        
     Returns a status string.
     """
     path = Path(path)
@@ -285,27 +304,64 @@ async def ingest_document(path: str | Path) -> str:
     if path.suffix.lower() not in _EXTRACTORS:
         return f"Unsupported format: {path.suffix} (supported: {list(_EXTRACTORS)})"
 
+    # Get project ID if project name provided
+    project_id = None
+    if project:
+        from app.memory.projects import _get_db as _get_projects_db, _slugify
+        slug = _slugify(project)
+        conn = _get_projects_db()
+        try:
+            row = conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()
+            if row:
+                project_id = row[0]
+            else:
+                return f"Project '{project}' not found. Create it first with: project_new('{project}')"
+        finally:
+            conn.close()
+
     loop = asyncio.get_running_loop()
-    added, skipped = await loop.run_in_executor(None, _ingest_sync, path)
+    added, skipped = await loop.run_in_executor(None, _ingest_sync, path, project_id)
 
     if added == 0 and skipped == 0:
         return f"Nothing ingested from {path.name} — extraction returned no text."
 
+    project_note = f" to project '{project}'" if project else ""
     return (
-        f"Ingested '{path.name}': {added} chunk(s) added"
+        f"Ingested '{path.name}'{project_note}: {added} chunk(s) added"
         + (f", {skipped} unchanged" if skipped else "")
         + "."
     )
 
 
-async def ingest_directory(directory: str | Path, recursive: bool = True) -> str:
+async def ingest_directory(directory: str | Path = "", recursive: bool = True, project: str = None) -> str:
     """
     Ingest all supported documents in a directory.
+
+    Args:
+        directory: Path to directory (defaults to settings.rag_documents_dir)
+        recursive: Whether to search subdirectories
+        project: Optional project name to scope documents to
+
     Returns a summary string.
     """
-    directory = Path(directory)
+    directory = Path(directory) if directory else settings.rag_documents_dir
     if not directory.is_dir():
         return f"Not a directory: {directory}"
+
+    # Get project ID if project name provided
+    project_id = None
+    if project:
+        from app.memory.projects import _get_db as _get_projects_db, _slugify
+        slug = _slugify(project)
+        conn = _get_projects_db()
+        try:
+            row = conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()
+            if row:
+                project_id = row[0]
+            else:
+                return f"Project '{project}' not found. Create it first with: project_new('{project}')"
+        finally:
+            conn.close()
 
     pattern = "**/*" if recursive else "*"
     files = [
@@ -322,39 +378,69 @@ async def ingest_directory(directory: str | Path, recursive: bool = True) -> str
     for f in files:
         loop = asyncio.get_running_loop()
         try:
-            added, skipped = await loop.run_in_executor(None, _ingest_sync, f)
+            added, skipped = await loop.run_in_executor(None, _ingest_sync, f, project_id)
             total_added   += added
             total_skipped += skipped
         except Exception as e:
             logger.error("Failed to ingest {}: {}", f.name, e)
             errors += 1
 
+    project_note = f" to project '{project}'" if project else ""
     return (
-        f"Directory ingestion complete: {len(files)} files, "
+        f"Directory ingestion complete{project_note}: {len(files)} files, "
         f"{total_added} chunks added, {total_skipped} unchanged"
         + (f", {errors} errors" if errors else "")
         + "."
     )
 
 
-async def list_ingested_documents() -> str:
-    """List all documents currently in the doc_vectors table."""
+async def list_ingested_documents(project: str = None) -> str:
+    """
+    List all documents currently in the doc_vectors table.
+    
+    Args:
+        project: Optional project name to filter documents
+    """
+    # Get project ID if project name provided
+    project_id = None
+    if project:
+        from app.memory.projects import _get_db as _get_projects_db, _slugify
+        slug = _slugify(project)
+        conn = _get_projects_db()
+        try:
+            row = conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()
+            if row:
+                project_id = row[0]
+        finally:
+            conn.close()
+
     loop = asyncio.get_running_loop()
 
     def _list():
         conn = _get_doc_db()
-        rows = conn.execute("""
-            SELECT source_path, title, COUNT(*) as chunks, MAX(indexed_at) as last_indexed
-            FROM doc_vectors
-            GROUP BY source_path
-            ORDER BY last_indexed DESC
-        """).fetchall()
+        if project_id is not None:
+            rows = conn.execute("""
+                SELECT source_path, title, COUNT(*) as chunks, MAX(indexed_at) as last_indexed
+                FROM doc_vectors
+                WHERE project_id=?
+                GROUP BY source_path
+                ORDER BY last_indexed DESC
+            """, (project_id,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT source_path, title, COUNT(*) as chunks, MAX(indexed_at) as last_indexed
+                FROM doc_vectors
+                GROUP BY source_path
+                ORDER BY last_indexed DESC
+            """).fetchall()
         conn.close()
         return rows
 
     rows = await loop.run_in_executor(None, _list)
 
     if not rows:
+        if project:
+            return f"No documents ingested for project '{project}'. Use: ingest_document('<path>', project='{project}')"
         return "No documents ingested yet. Use 'ingest document <path>' to add files."
 
     lines = []
@@ -362,23 +448,60 @@ async def list_ingested_documents() -> str:
         suffix = Path(source_path).suffix.upper().lstrip(".")
         lines.append(f"  [{suffix}] {title} — {chunks} chunks (indexed {last_indexed[:10]})")
 
-    return f"Ingested documents ({len(rows)}):\n" + "\n".join(lines)
+    header = f"Ingested documents for '{project}' ({len(rows)}):" if project else f"Ingested documents ({len(rows)}):"
+    return header + "\n" + "\n".join(lines)
 
 
 async def remove_document(path: str | Path) -> str:
-    """Remove a document's chunks from the vector store."""
-    path = Path(path)
+    """
+    Remove a document's chunks from the vector store.
+
+    Accepts either a full source path or a bare title/filename, since callers
+    (the UI list and spoken requests alike) usually only know the title.
+    An ambiguous title is reported rather than guessed at.
+    """
+    identifier = str(path)
+    name = Path(identifier).name
+    stem = Path(identifier).stem
     loop = asyncio.get_running_loop()
 
     def _remove():
         conn = _get_doc_db()
-        cur = conn.execute("DELETE FROM doc_vectors WHERE source_path=?", (str(path),))
-        count = cur.rowcount
-        conn.commit()
-        conn.close()
-        return count
+        try:
+            cur = conn.execute(
+                "DELETE FROM doc_vectors WHERE source_path=?", (identifier,)
+            )
+            if cur.rowcount:
+                conn.commit()
+                return cur.rowcount, []
 
-    removed = await loop.run_in_executor(None, _remove)
+            # Not a known path — resolve it as a title/filename instead.
+            # title is always path.stem at ingest, so this matches on every OS.
+            candidates = [
+                row[0] for row in conn.execute(
+                    "SELECT DISTINCT source_path FROM doc_vectors WHERE title=? COLLATE NOCASE",
+                    (stem,),
+                ).fetchall()
+            ]
+            if len(candidates) != 1:
+                return 0, candidates
+
+            cur = conn.execute(
+                "DELETE FROM doc_vectors WHERE source_path=?", (candidates[0],)
+            )
+            conn.commit()
+            return cur.rowcount, []
+        finally:
+            conn.close()
+
+    removed, candidates = await loop.run_in_executor(None, _remove)
+
     if removed:
-        return f"Removed {removed} chunk(s) for '{path.name}' from the document index."
-    return f"'{path.name}' was not found in the document index."
+        return f"Removed {removed} chunk(s) for '{name}' from the document index."
+    if candidates:
+        listed = "\n".join(f"  - {c}" for c in candidates)
+        return (
+            f"'{name}' matches {len(candidates)} indexed documents — "
+            f"pass the full path of the one to remove:\n{listed}"
+        )
+    return f"'{name}' was not found in the document index."

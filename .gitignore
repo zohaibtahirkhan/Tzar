@@ -34,3 +34,19 @@ coverage/
 # md files
 RESEARCH_PAPER.md
 IMPLEMENTATION_SUMMARY.md
+
+# graphify knowledge graph (regenerated locally with `graphify update .`)
+graphify-out/
+
+# Personal assistant state — recreated on first run, never commit it
+data/MEMORY.md
+data/USER.md
+data/conversations/
+data/skills/
+data/vault/
+llama.cpp/
+.claude/
+CLAUDE.md
+
+# Tauri regenerates these on build
+ui/src-tauri/gen/schemas/

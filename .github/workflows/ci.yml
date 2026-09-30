@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Wiring, routing eval, and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      # The suite mocks every model and imports heavy libraries lazily, so it
+      # runs on the slim requirements-ci.txt set (~1 min install, not ~10).
+      - name: Install test dependencies
+        run: pip install -r requirements-ci.txt
+
+      # Fast, labelled feedback first: these two files are the guards against
+      # "built but never connected" and "a regex tweak silently re-routed input".
+      - name: Wiring checks
+        run: pytest tests/test_13_wiring.py -q
+
+      - name: Routing eval
+        run: pytest tests/test_14_routing_eval.py -q -rxX
+
+      - name: Full offline test suite
+        run: pytest -q -m "not integration" -rxX

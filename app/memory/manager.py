@@ -40,6 +40,24 @@ class LongTermMemory:
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
                 USING fts5(content, category, content=memories, content_rowid=id)
             """)
+            # Standard external-content sync triggers: the index follows every
+            # write path, and the delete/update ordering rules live in SQLite.
+            await db.executescript("""
+                CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid, content, category)
+                    VALUES (new.id, new.content, new.category);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, category)
+                    VALUES ('delete', old.id, old.content, old.category);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, category)
+                    VALUES ('delete', old.id, old.content, old.category);
+                    INSERT INTO memories_fts(rowid, content, category)
+                    VALUES (new.id, new.content, new.category);
+                END;
+            """)
             await db.commit()
         self._initialized = True
         logger.info("Long-term memory initialized at {}", self.db_path)
@@ -49,10 +67,6 @@ class LongTermMemory:
             cursor = await db.execute(
                 "INSERT INTO memories (category, content) VALUES (?, ?)",
                 (category, content),
-            )
-            await db.execute(
-                "INSERT INTO memories_fts(rowid, content, category) VALUES (?, ?, ?)",
-                (cursor.lastrowid, content, category),
             )
             await db.commit()
             logger.debug("Saved memory [{}]: {}", category, content[:60])
@@ -102,7 +116,6 @@ class LongTermMemory:
     async def delete(self, memory_id: int) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            await db.execute("DELETE FROM memories_fts WHERE rowid = ?", (memory_id,))
             await db.commit()
             return True
 
@@ -139,7 +152,7 @@ class ShortTermMemory:
         """Return messages in LLM-compatible format."""
         return [{"role": m["role"], "content": m["content"]} for m in self._buffer]
 
-    def format_for_prompt(self, max_chars: int = 1800) -> str:
+    def format_for_prompt(self, max_chars: int = 800) -> str:
         """Return conversation history truncated to max_chars (rough token proxy)."""
         if not self._buffer:
             return "No prior conversation."
@@ -147,7 +160,7 @@ class ShortTermMemory:
         for m in self._buffer:
             role = "User" if m["role"] == "user" else "Assistant"
             # Truncate very long individual turns
-            content = m["content"][:400] + ("…" if len(m["content"]) > 400 else "")
+            content = m["content"][:200] + ("…" if len(m["content"]) > 200 else "")
             lines.append(f"{role}: {content}")
         result = "\n".join(lines)
         # If still too long, keep only the most recent turns
@@ -179,7 +192,10 @@ class MemoryManager:
 
     async def get_context(self, query: str = "") -> tuple[str, str]:
         """Returns (memory_context, conversation_history) for prompt building."""
-        memory_ctx = await self.long_term.format_for_context(query)
+        memory_ctx = (
+            await self.long_term.format_for_context(query)
+            if settings.memory_long_term_enabled else ""
+        )
         conv_history = self.short_term.format_for_prompt()
         return memory_ctx, conv_history
 

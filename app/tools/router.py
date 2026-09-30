@@ -15,6 +15,7 @@ Flow:
         ↓
     Result returned to LLM as tool_result message
 """
+import asyncio
 import json
 import re
 from typing import Any
@@ -206,7 +207,7 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "doc_search":           ["query"],
     "unified_search":       ["query"],
     "ingest_document":      ["path"],
-    "ingest_directory":     ["directory"],
+    "ingest_directory":     [],          # defaults to settings.rag_documents_dir
     "list_documents":       [],
     "remove_document":      ["path"],
     "mcp_status":       [],
@@ -222,9 +223,15 @@ TOOL_SCHEMA: dict[str, list[str]] = {
     "skill_learning_stats":   [],
     "confirm_skill_proposal": [],
     "system_profile": [],
+    "goal_list":      [],
+    "goal_status":    [],          # goal_id optional — defaults to the active goal
+    "goal_abandon":   [],
+    "browser_action": [],          # needs task or url; the tool validates this itself
 }
 
 DESTRUCTIVE_TOOLS = {"delete_file", "write_file"}
+
+TOOL_EXECUTION_TIMEOUT_SECONDS = 30.0   # applied inside dispatch() to every tool
 
 
 # ─── Parser ───────────────────────────────────────────────────────────────────
@@ -269,7 +276,8 @@ class ToolRouter:
 
     async def dispatch(self, tool_call: dict) -> dict:
         """
-        Validate and execute a single tool call.
+        Validate and execute a single tool call, bounded by
+        TOOL_EXECUTION_TIMEOUT_SECONDS. Never raises.
         Returns {"tool": name, "status": "ok"|"error", "result": str}
         """
         tool_name = tool_call.get("tool", "")
@@ -282,7 +290,13 @@ class ToolRouter:
             return {"tool": tool_name, "status": "error", "result": str(e)}
 
         logger.info("Dispatching tool: {} with params: {}", tool_name, list(params.keys()))
+        try:
+            return await asyncio.wait_for(self._execute(tool_name, params), timeout=TOOL_EXECUTION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.error("Tool '{}' timed out after {}s", tool_name, TOOL_EXECUTION_TIMEOUT_SECONDS)
+            return {"tool": tool_name, "status": "error", "result": "Tool timed out."}
 
+    async def _execute(self, tool_name: str, params: dict) -> dict:
         try:
             # Memory tools (need manager reference)
             if tool_name == "save_memory":
@@ -370,6 +384,11 @@ class ToolRouter:
             # Registered async tools
             fn = TOOL_REGISTRY[tool_name]
             result = await fn(**params)
+            # Some tools (goal_*, browser_action) build the full envelope
+            # themselves so they can report their own status; pass it through
+            # instead of nesting it under "result".
+            if isinstance(result, dict) and {"status", "result"} <= result.keys():
+                return {"tool": tool_name, **result}
             return {"tool": tool_name, "status": "ok", "result": result}
 
         except PermissionError as e:
