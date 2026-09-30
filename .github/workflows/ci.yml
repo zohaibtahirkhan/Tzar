@@ -7,9 +7,13 @@ on:
 
 jobs:
   test:
-    name: Wiring, routing eval, and unit tests
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -35,3 +39,29 @@ jobs:
 
       - name: Full offline test suite
         run: pytest -q -m "not integration" -rxX
+
+  # The test job uses the slim CI requirements. This one installs the real
+  # requirements.txt on Windows and imports the heavy libraries, to catch
+  # missing wheels or DLLs that the mocked suite never touches.
+  windows-install:
+    name: Windows full install smoke test
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install full requirements
+        run: pip install -r requirements.txt
+
+      - name: Import heavy libraries
+        run: python -c "import faster_whisper, kokoro, openwakeword, silero_vad, sounddevice, soundfile, sentence_transformers, watchdog, pdfplumber, docx, ebooklib, psutil"
+
+      - name: CLI starts
+        run: python -m app.main --help

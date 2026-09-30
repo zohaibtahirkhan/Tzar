@@ -25,7 +25,7 @@ Named after **ضار** — the keeper, the one who preserves.
 
 | | Minimum | Recommended |
 |---|---|---|
-| OS | Ubuntu 22.04+ (the only tested platform, see [Platforms](#platforms)) | Ubuntu 24.04 |
+| OS | Ubuntu 22.04+ or macOS (tested), Windows (see [Platforms](#platforms)) | Ubuntu 24.04 |
 | Python | 3.11 | 3.11 |
 | CPU | 4 cores | 8+ cores |
 | RAM | 8 GB | 16 GB+ |
@@ -427,9 +427,9 @@ Both services are published on `127.0.0.1` only. Set `OBSIDIAN_VAULT_PATH` in yo
 
 ## Platforms
 
-Tested on **Ubuntu (x86_64)**.
+Tested on **Ubuntu (x86_64)** and **macOS**.
 
-The code has macOS and Windows paths (sounddevice audio, the Ollama backend, Metal offload for llama.cpp), but they haven't been tested yet. If you try it, please open an issue with what worked and what didn't.
+Windows: CI installs the full requirements and runs the test suite on `windows-latest`, but the voice loop (microphone, speakers) hasn't been tried on a real Windows machine yet. If you try it, please open an issue with what worked and what didn't.
 
 ---
 
