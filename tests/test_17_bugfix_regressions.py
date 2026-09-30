@@ -403,4 +403,5 @@ def test_env_example_loads_as_is(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     s = Settings()
     assert s.audio_input_device is None and s.audio_output_device is None
-    assert "~" not in str(s.obsidian_vault_path)
+    # startswith, not `in`: Windows 8.3 short paths (C:\Users\RUNNER~1) contain "~"
+    assert not str(s.obsidian_vault_path).startswith("~")

@@ -46,6 +46,7 @@ data/skills/
 data/vault/
 llama.cpp/
 .claude/
+brag-output/
 CLAUDE.md
 
 # Tauri regenerates these on build
