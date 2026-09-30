@@ -75,7 +75,15 @@ export function DocsPanel() {
   };
 
   const handleRemove = async (path: string, title: string) => {
-    await removeDocument(path || title);
+    setIngestResult("");
+    try {
+      const res = await removeDocument(path || title);
+      // Surface the backend message — a removal can legitimately fail (unknown
+      // or ambiguous title) and must not look like it succeeded.
+      setIngestResult(res.result ?? "");
+    } catch (err) {
+      setIngestResult(String(err));
+    }
     load();
   };
 

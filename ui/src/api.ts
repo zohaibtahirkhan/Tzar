@@ -2,7 +2,8 @@
  * src/api.ts — complete typed client for the Tzar FastAPI backend.
  */
 
-const BASE = "http://127.0.0.1:8000";
+// Use proxy in dev mode (relative URLs), direct connection in production
+const BASE = import.meta.env.DEV ? "" : "http://127.0.0.1:8000";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,14 @@ export interface HealthResponse {
 export interface ChatResponse {
   response: string;
   tool_results?: ToolResult[];
+  sources?: Source[];
+}
+
+/** A note or document the answer was grounded in. */
+export interface Source {
+  title: string;
+  location: string;
+  kind: "document" | "note";
 }
 
 export interface ToolResult {
@@ -81,7 +90,8 @@ export function streamChat(
   onToken: (token: string) => void,
   onToolResults: (results: ToolResult[]) => void,
   onDone: () => void,
-  onError: (err: string) => void
+  onError: (err: string) => void,
+  onSources: (sources: Source[]) => void = () => {}
 ): AbortController {
   const ctrl = new AbortController();
 
@@ -114,6 +124,7 @@ export function streamChat(
             const parsed = JSON.parse(data);
             if (parsed.token)        onToken(parsed.token);
             if (parsed.tool_results) onToolResults(parsed.tool_results);
+            if (parsed.sources)      onSources(parsed.sources);
             if (parsed.error)        onError(parsed.error);
           } catch { /* ignore */ }
         }

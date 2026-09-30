@@ -2,7 +2,7 @@
  * src/stores/useStore.ts — global Zustand store
  */
 import { create } from "zustand";
-import type { Memory, HealthResponse, RagDoc } from "../api";
+import type { Memory, HealthResponse, RagDoc, Source } from "../api";
 
 export type Panel = "chat" | "memory" | "graph" | "skills" | "projects" | "docs" | "system" | "settings" | "tests";
 
@@ -12,6 +12,7 @@ export interface Message {
   content: string;
   streaming?: boolean;
   toolResults?: { tool: string; result: string; status: string }[];
+  sources?: Source[];
   ts: number;
 }
 
@@ -36,6 +37,7 @@ interface State {
   addMessage: (m: Message) => void;
   appendToken: (id: string, token: string) => void;
   appendToolResults: (id: string, results: { tool: string; result: string; status: string }[]) => void;
+  setSources: (id: string, sources: Source[]) => void;
   finaliseStream: (id: string) => void;
   clearChat: () => void;
   inputText: string;
@@ -106,6 +108,10 @@ export const useStore = create<State>((set) => ({
       messages: s.messages.map((m) =>
         m.id === id ? { ...m, toolResults: [...(m.toolResults ?? []), ...results] } : m
       ),
+    })),
+  setSources: (id, sources) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, sources } : m)),
     })),
   finaliseStream: (id) =>
     set((s) => ({

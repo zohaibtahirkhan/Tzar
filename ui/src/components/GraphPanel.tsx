@@ -1,10 +1,10 @@
 /**
  * src/components/GraphPanel.tsx
- * D3 force-directed KG. Click node to expand. Node search. Path finder.
+ * D3 force-directed KG. Click node to expand. Node search. Path finder. Timeline view.
  */
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import * as d3 from "d3";
-import { GitBranch, RefreshCw, ZoomIn, ZoomOut, Search } from "lucide-react";
+import { GitBranch, RefreshCw, ZoomIn, ZoomOut, Search, Clock, Network } from "lucide-react";
 import { useStore, type KGNode, type KGEdge } from "../stores/useStore";
 import { invokeTool } from "../api";
 
@@ -53,6 +53,12 @@ function parseKGText(raw: string): { nodes: KGNode[]; edges: KGEdge[] } {
   return { nodes, edges };
 }
 
+interface NodeDetail {
+  node: KGNode;
+  relations: Array<{ target: string; relation: string; direction: "out" }
+                  | { source: string; relation: string; direction: "in" }>;
+}
+
 export function GraphPanel() {
   const svgRef  = useRef<SVGSVGElement>(null);
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown>>();
@@ -61,19 +67,86 @@ export function GraphPanel() {
   const [pathA, setPathA]     = useState("");
   const [pathB, setPathB]     = useState("");
   const [pathResult, setPathResult] = useState("");
+  const [viewMode, setViewMode] = useState<"graph" | "timeline">("graph");
+  const [timelineData, setTimelineData] = useState<string>("");
+  const [selectedNode, setSelectedNode] = useState<NodeDetail | null>(null);
+  const [showOrphans, setShowOrphans] = useState(true);
+  const [orphanNodes, setOrphanNodes] = useState<Set<string>>(new Set());
 
   const loadGraph = useCallback(async () => {
     setKGLoading(true);
     try {
-      const [summaryRes, clusterRes] = await Promise.all([
+      const [summaryRes, clusterRes, orphansRes] = await Promise.all([
         invokeTool("kg_summary"),
         invokeTool("kg_clusters", { min_size: 2 }),
+        invokeTool("kg_orphans"),
       ]);
       const combined = (summaryRes.result ?? "") + "\n" + (clusterRes.result ?? "");
       const { nodes, edges } = parseKGText(combined);
+      
+      // Parse orphan nodes and add them to nodes array
+      const orphanText = orphansRes.result ?? "";
+      const orphanMatches = orphanText.match(/^(?!Orphan nodes)(\w[\w\s]+?)\s*\[(\w+)\]/gm);
+      const orphans = new Set<string>();
+      
+      if (orphanMatches) {
+        orphanMatches.forEach(match => {
+          const parts = match.match(/^(\w[\w\s]+?)\s*\[(\w+)\]/);
+          if (parts) {
+            const name = parts[1].trim();
+            const label = parts[2].trim();
+            orphans.add(name);
+            
+            // Add orphan node if not already in nodes array
+            if (!nodes.find(n => n.id === name)) {
+              nodes.push({ id: name, label: name, group: label });
+            }
+          }
+        });
+      }
+      
+      setOrphanNodes(orphans);
       setKG(nodes, edges);
     } catch (e) { console.error(e); } finally { setKGLoading(false); }
   }, [setKG, setKGLoading]);
+
+  const loadTimeline = useCallback(async () => {
+    setKGLoading(true);
+    try {
+      // Try to get orphan nodes which show recent additions
+      const orphansRes = await invokeTool("kg_orphans");
+      setTimelineData(orphansRes.result || "No timeline data available. Try adding nodes to the knowledge graph first.");
+    } catch (e) {
+      setTimelineData("Unable to load timeline data.");
+    } finally {
+      setKGLoading(false);
+    }
+  }, [setKGLoading]);
+
+  const getNodeDetails = useCallback((nodeId: string): NodeDetail | null => {
+    const node = kgNodes.find(n => n.id === nodeId);
+    if (!node) return null;
+
+    const relations: NodeDetail["relations"] = [];
+    
+    // Outgoing edges
+    kgEdges.forEach(edge => {
+      if (edge.source === nodeId || (typeof edge.source === 'object' && (edge.source as any).id === nodeId)) {
+        const targetId = typeof edge.target === 'string' ? edge.target : (edge.target as any).id;
+        relations.push({ target: targetId, relation: edge.relation, direction: "out" });
+      }
+    });
+    
+    // Incoming edges
+    kgEdges.forEach(edge => {
+      if (edge.target === nodeId || (typeof edge.target === 'object' && (edge.target as any).id === nodeId)) {
+        const sourceId = typeof edge.source === 'string' ? edge.source : (edge.source as any).id;
+        relations.push({ source: sourceId, relation: edge.relation, direction: "in" });
+      }
+    });
+
+    return { node, relations };
+  }, [kgNodes, kgEdges]);
 
   const expandNode = useCallback(async (nodeId: string) => {
     const res = await invokeTool("kg_neighbors", { node: nodeId, depth: 1 });
@@ -86,7 +159,13 @@ export function GraphPanel() {
     );
   }, [kgNodes, kgEdges, setKG]);
 
-  useEffect(() => { loadGraph(); }, []);
+  useEffect(() => { 
+    if (viewMode === "graph") {
+      loadGraph();
+    } else {
+      loadTimeline();
+    }
+  }, [viewMode, loadGraph, loadTimeline]);
 
   // D3 render
   useEffect(() => {
@@ -96,7 +175,13 @@ export function GraphPanel() {
 
     const rect = svgRef.current!.getBoundingClientRect();
     const W = rect.width || 800, H = rect.height || 500;
-    const simNodes: SimNode[] = kgNodes.map(n => ({ ...n }));
+    
+    // Filter nodes based on orphan toggle
+    const filteredNodes = showOrphans 
+      ? kgNodes 
+      : kgNodes.filter(n => !orphanNodes.has(n.id));
+    
+    const simNodes: SimNode[] = filteredNodes.map(n => ({ ...n }));
     const idMap = new Map(simNodes.map(n => [n.id, n]));
     const simLinks: SimLink[] = kgEdges
       .map(e => ({ source: idMap.get(e.source as string) ?? e.source, target: idMap.get(e.target as string) ?? e.target, relation: e.relation }))
@@ -114,10 +199,31 @@ export function GraphPanel() {
       .force("collide", d3.forceCollide(22));
 
     const linkSel = g.append("g").selectAll("line").data(simLinks).enter().append("line")
-      .attr("stroke", "rgba(255,255,255,0.08)").attr("stroke-width", 1.2);
+      .attr("stroke", "rgba(124, 58, 237, 0.35)")  // Purple with better visibility
+      .attr("stroke-width", 2)
+      .attr("marker-end", "url(#arrowhead)");  // Add arrow marker
+    
+    // Add arrowhead marker definition
+    svg.append("defs").append("marker")
+      .attr("id", "arrowhead")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 20)
+      .attr("refY", 0)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", "rgba(124, 58, 237, 0.5)");
 
     const linkLabelSel = g.append("g").selectAll("text").data(simLinks).enter().append("text")
-      .text(d => d.relation).attr("font-size", 7.5).attr("fill", "rgba(255,255,255,0.25)").attr("text-anchor", "middle");
+      .text(d => d.relation)
+      .attr("font-size", 9)
+      .attr("fill", "rgba(255,255,255,0.6)")  // More visible
+      .attr("text-anchor", "middle")
+      .attr("font-weight", 600)
+      .attr("pointer-events", "none")
+      .style("text-shadow", "0 0 3px rgba(0,0,0,0.8)");  // Add text shadow for readability
 
     const nodeSel = g.append("g").selectAll("g").data(simNodes).enter().append("g").attr("cursor", "pointer")
       .call(d3.drag<SVGGElement, SimNode>()
@@ -127,18 +233,31 @@ export function GraphPanel() {
       );
 
     nodeSel.append("circle").attr("r", 13)
-      .attr("fill", d => nodeColor(d.group)).attr("fill-opacity", 0.85)
-      .attr("stroke", "rgba(255,255,255,0.12)").attr("stroke-width", 1);
+      .attr("fill", d => nodeColor(d.group))
+      .attr("fill-opacity", 0.95)  // More opaque
+      .attr("stroke", "rgba(255,255,255,0.3)")  // More visible border
+      .attr("stroke-width", 2);
 
     nodeSel.append("text")
-      .text(d => d.label.length > 9 ? d.label.slice(0, 8) + "…" : d.label)
-      .attr("font-size", 8.5).attr("fill", "#e2e8f0").attr("text-anchor", "middle").attr("dy", "0.35em");
+      .text(d => d.label.length > 12 ? d.label.slice(0, 11) + "…" : d.label)
+      .attr("font-size", 9)
+      .attr("fill", "#fff")
+      .attr("text-anchor", "middle")
+      .attr("dy", "0.35em")
+      .attr("font-weight", 600)
+      .attr("pointer-events", "none")
+      .style("text-shadow", "0 1px 3px rgba(0,0,0,0.8)");  // Better text visibility
 
     nodeSel
-      .on("click", (_ev, d) => expandNode(d.id))
+      .on("click", (_ev, d) => {
+        const details = getNodeDetails(d.id);
+        if (details) {
+          setSelectedNode(details);
+        }
+      })
       .on("mouseenter", (ev, d) => {
         const [x, y] = d3.pointer(ev, svgRef.current!);
-        setTooltip({ x, y: y - 18, text: `${d.label} · ${d.group}` });
+        setTooltip({ x, y: y - 18, text: `${d.label} [${d.group}]` });
       })
       .on("mouseleave", () => setTooltip(null));
 
@@ -153,7 +272,7 @@ export function GraphPanel() {
     });
 
     return () => { sim.stop(); };
-  }, [kgNodes, kgEdges, expandNode]);
+  }, [kgNodes, kgEdges, expandNode, getNodeDetails, showOrphans, orphanNodes]);
 
   const doZoom = (factor: number) => {
     if (zoomRef.current) d3.select(svgRef.current!).transition().duration(250).call(zoomRef.current.scaleBy, factor);
@@ -161,8 +280,25 @@ export function GraphPanel() {
 
   const findPath = async () => {
     if (!pathA.trim() || !pathB.trim()) return;
-    const res = await invokeTool("kg_path", { source: pathA.trim(), target: pathB.trim() });
-    setPathResult(res.result ?? "No path found.");
+    setKGLoading(true);
+    try {
+      const res = await invokeTool("kg_path", { source: pathA.trim(), target: pathB.trim() });
+      setPathResult(res.result ?? "No path found.");
+      
+      // Parse path result and highlight nodes/edges in the graph if path found
+      if (res.result && !res.result.includes("No path") && !res.result.includes("not found")) {
+        // Extract nodes from path result (format: "A —[rel]→ B —[rel]→ C")
+        const pathNodes = res.result.match(/[\w\s]+(?=\s*—)/g);
+        if (pathNodes && pathNodes.length > 0) {
+          // TODO: Could highlight these nodes in the graph
+          console.log("Path nodes:", pathNodes);
+        }
+      }
+    } catch (e) {
+      setPathResult("Error finding path.");
+    } finally {
+      setKGLoading(false);
+    }
   };
 
   return (
@@ -173,9 +309,37 @@ export function GraphPanel() {
         <div className="panel-header-actions">
           <span className="stat-chip">{kgNodes.length} nodes</span>
           <span className="stat-chip">{kgEdges.length} edges</span>
-          <button className="btn-icon" onClick={() => doZoom(1.4)}><ZoomIn size={13} /></button>
-          <button className="btn-icon" onClick={() => doZoom(0.7)}><ZoomOut size={13} /></button>
-          <button className="btn-icon" onClick={loadGraph}><RefreshCw size={13} /></button>
+          <span className="stat-chip">{orphanNodes.size} orphans</span>
+          <button 
+            className={`btn-icon ${viewMode === "graph" ? "active" : ""}`} 
+            onClick={() => setViewMode("graph")}
+            title="Graph View"
+          >
+            <Network size={13} />
+          </button>
+          <button 
+            className={`btn-icon ${viewMode === "timeline" ? "active" : ""}`} 
+            onClick={() => setViewMode("timeline")}
+            title="Timeline View"
+          >
+            <Clock size={13} />
+          </button>
+          {viewMode === "graph" && (
+            <>
+              <button 
+                className={`btn-icon ${!showOrphans ? "active" : ""}`}
+                onClick={() => setShowOrphans(!showOrphans)}
+                title={showOrphans ? "Hide Orphan Nodes" : "Show Orphan Nodes"}
+              >
+                {showOrphans ? "👁️" : "👁️‍🗨️"}
+              </button>
+              <button className="btn-icon" onClick={() => doZoom(1.4)}><ZoomIn size={13} /></button>
+              <button className="btn-icon" onClick={() => doZoom(0.7)}><ZoomOut size={13} /></button>
+            </>
+          )}
+          <button className="btn-icon" onClick={() => viewMode === "graph" ? loadGraph() : loadTimeline()}>
+            <RefreshCw size={13} />
+          </button>
         </div>
       </div>
 
@@ -194,19 +358,118 @@ export function GraphPanel() {
         <input className="path-input" value={pathA} onChange={e => setPathA(e.target.value)} placeholder="From node…" />
         <span className="path-arrow">→</span>
         <input className="path-input" value={pathB} onChange={e => setPathB(e.target.value)} placeholder="To node…" />
-        <button className="btn-small" onClick={findPath}><Search size={11} /> Path</button>
+        <button className="btn-small" onClick={findPath} disabled={kgLoading}>
+          <Search size={11} /> {kgLoading ? "Searching..." : "Path"}
+        </button>
       </div>
-      {pathResult && <div className="path-result">{pathResult}</div>}
+      {pathResult && (
+        <div className="path-result-box">
+          <div className="path-result-header">
+            <span className="path-result-label">Path Found:</span>
+            <button className="btn-icon-small" onClick={() => setPathResult("")} title="Clear">×</button>
+          </div>
+          <div className="path-result-content">{pathResult}</div>
+        </div>
+      )}
 
       {/* Graph */}
       <div className="kg-container">
-        {kgLoading && <div className="kg-loading">Loading graph…</div>}
-        {!kgLoading && kgNodes.length === 0 && (
-          <div className="panel-empty">No graph data yet.<br />Create notes to start building your graph.</div>
+        {viewMode === "graph" && (
+          <>
+            {kgLoading && <div className="kg-loading">Loading graph…</div>}
+            {!kgLoading && kgNodes.length === 0 && (
+              <div className="panel-empty">
+                No graph data yet.<br />
+                Create notes or use "Add to knowledge graph: [text]" to start building your graph.
+              </div>
+            )}
+            <svg ref={svgRef} className="kg-svg" />
+            {tooltip && (
+              <div className="kg-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>
+            )}
+            
+            {/* Node Details Popup */}
+            {selectedNode && (
+              <div className="node-details-overlay" onClick={() => setSelectedNode(null)}>
+                <div className="node-details-popup" onClick={(e) => e.stopPropagation()}>
+                  <div className="node-details-header">
+                    <div>
+                      <h3>{selectedNode.node.label}</h3>
+                      <span className="node-type">{selectedNode.node.group}</span>
+                    </div>
+                    <button className="btn-icon" onClick={() => setSelectedNode(null)}>×</button>
+                  </div>
+                  
+                  <div className="node-details-body">
+                    <h4>Connections ({selectedNode.relations.length})</h4>
+                    {selectedNode.relations.length === 0 ? (
+                      <p className="no-connections">No connections yet</p>
+                    ) : (
+                      <div className="relations-list">
+                        {selectedNode.relations.map((rel, idx) => (
+                          <div key={idx} className="relation-item">
+                            {"target" in rel ? (
+                              // Outgoing relation
+                              <span>
+                                <strong>{selectedNode.node.label}</strong>
+                                <span className="relation-arrow">—[{rel.relation}]→</span>
+                                <strong>{rel.target}</strong>
+                              </span>
+                            ) : (
+                              // Incoming relation
+                              <span>
+                                <strong>{rel.source}</strong>
+                                <span className="relation-arrow">—[{rel.relation}]→</span>
+                                <strong>{selectedNode.node.label}</strong>
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className="node-details-actions">
+                    <button 
+                      className="btn-small" 
+                      onClick={() => {
+                        expandNode(selectedNode.node.id);
+                        setSelectedNode(null);
+                      }}
+                    >
+                      Expand Neighbors
+                    </button>
+                    <button 
+                      className="btn-small" 
+                      onClick={() => {
+                        setPathA(selectedNode.node.id);
+                        setSelectedNode(null);
+                      }}
+                    >
+                      Use in Path Finder
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
         )}
-        <svg ref={svgRef} className="kg-svg" />
-        {tooltip && (
-          <div className="kg-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>
+        
+        {viewMode === "timeline" && (
+          <div className="timeline-view">
+            <div className="timeline-info">
+              <h3>Knowledge Graph Timeline</h3>
+              <p>Shows recent nodes and when they were added to the graph.</p>
+            </div>
+            {timelineData ? (
+              <pre className="timeline-content">{timelineData}</pre>
+            ) : (
+              <div className="panel-empty">
+                Loading timeline data...<br />
+                Note: Timeline shows when specific nodes were added. Use "Show timeline for [node name]" for detailed node evolution.
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

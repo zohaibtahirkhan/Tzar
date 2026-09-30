@@ -154,10 +154,13 @@ const TEST_GROUPS: TestGroup[] = [
 
 // ─── Test runner ──────────────────────────────────────────────────────────────
 
+// Use proxy in dev mode (relative URLs), direct connection in production
+const API_BASE = import.meta.env.DEV ? "" : "http://127.0.0.1:8000";
+
 async function runTest(test: TestCase, signal: AbortSignal): Promise<TestResult> {
   const start = Date.now();
   try {
-    const res = await fetch("/chat", {
+    const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: test.query }),
